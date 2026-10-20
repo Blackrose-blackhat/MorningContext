@@ -48,6 +48,10 @@ cd MorningContext
   (Xcode 26 or its Command Line Tools: `xcode-select --install`).
 - The [Claude Code CLI](https://docs.claude.com/en/docs/claude-code), logged in (`claude` works in Terminal).
 - Optional: [Wispr Flow](https://wisprflow.ai), Codex, an ElevenLabs account.
+- Voice: the free on-device **Mac voice** works out of the box. For a more natural voice, bring **your own**
+  [ElevenLabs](https://elevenlabs.io) API key (the welcome walks you through it; it's kept in your Keychain).
+  The free ElevenLabs plan is 10,000 credits a month, about two weeks of daily briefs; when credits run out it
+  falls back to the Mac voice and says so. Never ship or share a key inside the app.
 
 The app appears as a **sunrise icon** in the menu bar. Open **Control Panel…** and turn on
 **Launch at login** so it's running when the lid opens. Use **Check Sources…** to confirm what it
@@ -62,6 +66,18 @@ finds on your Mac before the first morning.
 | Wispr Flow | `~/Library/Application Support/Wispr Flow/flow.sqlite` | Meetings (summary, notes, speaker-labelled transcript), notes, dictations grouped by app and time, and today's calendar. Opened read-only (falling back to immutable), so it never blocks Wispr Flow. |
 | Extra folder (optional) | whatever you set | `.txt/.md/.vtt/.srt/.json` files modified in the window — handy if a meeting recorder exports transcripts. |
 | Trackers & email (optional) | via Claude Code / Codex | Each morning Claude plans what's worth checking with the connectors you already have (Jira, Azure Boards, Gmail, …) and runs those checks read-only, in parallel, in the repo they belong to. |
+
+## Signing (stop repeated permission prompts)
+
+Builds are ad-hoc signed by default, and an ad-hoc signature changes with every build, so macOS treats each
+build as a new app and asks again for Keychain, microphone and speech access. If you build from source, make
+a local signing certificate once and `build.sh` uses it automatically:
+
+1. Open **Keychain Access** → menu **Keychain Access → Certificate Assistant → Create a Certificate…**
+2. Name: `Morning Context Local Signing`, Identity Type: **Self-Signed Root**, Certificate Type: **Code Signing** → Create.
+3. Run `./build.sh --install`. Allow the prompts one last time; later builds keep the permissions.
+
+With an Apple Developer ID, run `CODESIGN_IDENTITY="Developer ID Application: …" ./build.sh` instead.
 
 ## Privacy: what leaves your Mac
 
@@ -152,6 +168,11 @@ scripts/test.sh          runs the tests (works with Command Line Tools only)
 
 Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md), and please report security
 issues privately as described in [SECURITY.md](SECURITY.md).
+
+## Credits
+
+The voice UI components (Orb, Shimmering Text, Bar Visualizer, Voice Picker) are native SwiftUI ports of
+[ElevenLabs UI](https://github.com/elevenlabs/ui), MIT License, Copyright (c) 2025 Eleven Labs Inc.
 
 ## License
 
