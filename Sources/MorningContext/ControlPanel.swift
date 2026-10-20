@@ -158,9 +158,9 @@ final class ControlPanelModel: ObservableObject {
             ("\(connected) of \(c.count)", "sources working"),
             ("\(claude.sessions.count + codex.threads.count)", "Claude + Codex sessions \(since.replacingOccurrences(of: "since ", with: "since\n"))"),
             ("\(running) running", "Claude jobs"),
-            (ElevenLabs.probablyConfigured ? ((Settings.defaults.string(forKey: Settings.Key.elevenLabsVoiceName) ?? "ElevenLabs")
+            (Settings.useElevenLabs && ElevenLabs.probablyConfigured ? ((Settings.defaults.string(forKey: Settings.Key.elevenLabsVoiceName) ?? "ElevenLabs")
                 .components(separatedBy: " - ").first ?? "ElevenLabs") : "Mac voice",
-             ElevenLabs.probablyConfigured ? "ElevenLabs voice" : "add ElevenLabs for a natural voice"),
+             Settings.useElevenLabs && ElevenLabs.probablyConfigured ? "ElevenLabs voice" : "your System Settings voice"),
         ]
         jobs = ClaudeJobs.shared.jobs
         let today = Dates.dayKey.string(from: Date())
@@ -305,7 +305,7 @@ struct WelcomeView: View {
     @AppStorage(Settings.Key.elevenLabsVoiceId) private var elevenVoiceId = ""
     @State private var launchAtLogin = LoginItem.isEnabled
     @State private var asking = false
-    @State private var useEleven = ElevenLabs.probablyConfigured
+    @State private var useEleven = Settings.useElevenLabs
     @State private var elevenKey = ""
     @State private var elevenVoices: [ElevenLabs.Voice] = []
     @State private var voiceStatus = ""
@@ -369,8 +369,8 @@ struct WelcomeView: View {
             page(orb: .talking, title: "How should I sound?", text: "Pick a voice. You can change it later in Control Panel → Voice.") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 10) {
-                        choice(!useEleven, "Mac voice", "Free, on this Mac", "laptopcomputer") { useEleven = false }
-                        choice(useEleven, "ElevenLabs", "More natural · your own key", "waveform") { useEleven = true }
+                        choice(!useEleven, "Mac voice", "Free, on this Mac", "laptopcomputer") { useEleven = false; Settings.useElevenLabs = false; voiceStatus = "" }
+                        choice(useEleven, "ElevenLabs", "More natural · your own key", "waveform") { useEleven = true; Settings.useElevenLabs = true; voiceStatus = "" }
                     }
                     if useEleven { elevenSetup } else { macVoiceTip }
                     if !voiceStatus.isEmpty { Text(voiceStatus).font(.caption).foregroundStyle(.secondary) }
@@ -423,6 +423,7 @@ struct WelcomeView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Works right away. For a far more natural sound, download a Premium voice such as \"Zoe (Premium)\".")
                 .font(.callout).fixedSize(horizontal: false, vertical: true)
+            CurrentVoiceLine()
             HStack {
                 Button("Open Spoken Content settings") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?SpokenContent") { NSWorkspace.shared.open(url) }
@@ -928,6 +929,7 @@ struct VoiceSettingsView: View {
     @AppStorage(Settings.Key.conversationModel) private var conversationModel = ""
     @AppStorage(Settings.Key.elevenLabsVoiceId) private var elevenVoiceId = ""
     @AppStorage(Settings.Key.pronunciations) private var pronunciations = Settings.defaultPronunciations
+    @State private var useEleven = Settings.useElevenLabs
     @State private var elevenKey = ElevenLabs.apiKey
     @State private var elevenVoices: [ElevenLabs.Voice] = []
     @State private var elevenStatus = ""
@@ -943,7 +945,15 @@ struct VoiceSettingsView: View {
                 Text("Summon any time with ⌃⌥M. Tap the orb or press Space to interrupt, Esc to close.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("ElevenLabs voice (recommended)") {
+            Section("Speak with") {
+                Picker("", selection: $useEleven) {
+                    Text("Mac voice (free)").tag(false)
+                    Text("ElevenLabs (your key)").tag(true)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                .onChange(of: useEleven) { Settings.useElevenLabs = $0 }
+            }
+            Section("ElevenLabs voice") {
                 SecureField("API key", text: $elevenKey, prompt: Text("Paste from elevenlabs.io → Profile → API keys"))
                     .onChange(of: elevenKey) { ElevenLabs.apiKey = $0; elevenStatus = "" }
                 HStack {
@@ -974,10 +984,11 @@ struct VoiceSettingsView: View {
             Section("Mac voice (fallback)") {
                 Toggle("Read the written brief aloud when it opens", isOn: $autoSpeak)
                 Picker("Voice", selection: $voiceIdentifier) {
-                    Text("Best available").tag("")
+                    Text("System voice (System Settings → Spoken Content)").tag("")
                     ForEach(voices, id: \.identifier) { v in Text("\(v.name) · \(v.language) · \(Speaker.qualityLabel(v))").tag(v.identifier) }
                 }
                 Slider(value: $speechRate, in: 0.35...0.65) { Text("Speed") }
+                CurrentVoiceLine()
             }
         }
         .formStyle(.grouped)
@@ -1004,5 +1015,26 @@ struct VoiceSettingsView: View {
             case .failure(let e): elevenStatus = e.localizedDescription
             }
         }
+    }
+}
+
+
+/// "Now using: Samantha · basic quality", with a nudge to download a Premium voice when only basic ones exist.
+struct CurrentVoiceLine: View {
+    @State private var tick = 0
+    var body: some View {
+        let v = Speaker.resolveVoice()
+        let quality = v.map { $0.quality == .premium ? "Premium" : ($0.quality == .enhanced ? "Enhanced" : "basic quality") } ?? "system default"
+        HStack(spacing: 6) {
+            Image(systemName: v?.quality == .premium ? "checkmark.seal.fill" : "info.circle")
+                .foregroundStyle(v?.quality == .premium ? .green : .secondary)
+            Text("Now using: \(v?.name ?? "system voice") · \(quality)").font(.caption)
+            if v?.quality == .default {
+                Text("— a Premium voice will sound much more natural").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button { tick += 1 } label: { Image(systemName: "arrow.clockwise") }.buttonStyle(.plain).help("Re-check after changing the voice in System Settings")
+        }
+        .id(tick)
     }
 }

@@ -435,8 +435,10 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
         var rendering = false
         var useMacVoice: Bool
         var task: URLSessionDataTask?
+        var index = 0         // position in the reply, for natural variation between sentences
         init(caption: String, text: String, useMacVoice: Bool) { self.caption = caption; self.text = text; self.useMacVoice = useMacVoice }
     }
+    private var sentenceIndex = 0
 
     private let synth = AVSpeechSynthesizer()
     private let renderer = AVSpeechSynthesizer()
@@ -462,7 +464,10 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     func say(_ sentence: String) {
         let s = Pronunciation.normalize(sentence)
         guard !s.isEmpty else { return }
-        let item = Item(caption: sentence.trimmingCharacters(in: .whitespacesAndNewlines), text: s, useMacVoice: !ElevenLabs.isConfigured || cloudFailed)
+        let item = Item(caption: Humanize.caption(sentence.trimmingCharacters(in: .whitespacesAndNewlines)), text: s,
+                        useMacVoice: !Settings.useElevenLabs || cloudFailed || !ElevenLabs.isConfigured)
+        item.index = sentenceIndex
+        sentenceIndex += 1
         queue.append(item)
         if item.useMacVoice { renderIfNeeded(item) } else { fetch(item) }
         pump()
@@ -470,6 +475,7 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
 
     func stop() {
         generation += 1
+        sentenceIndex = 0
         queue.forEach { $0.task?.cancel() }
         queue.removeAll()
         playing = false
@@ -481,7 +487,7 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     private func fetch(_ item: Item) {
         let gen = generation
         let started = Date()
-        let s = item.text
+        let s = Humanize.caption(item.text)   // ElevenLabs gets plain text (no stress markers)
         item.task = ElevenLabs.synthesize(s) { [weak self, weak item] result in
             guard let self, let item, gen == self.generation else { return }
             switch result {
@@ -505,10 +511,12 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
         item.rendering = true
         let gen = generation
         var chunks: [AVAudioPCMBuffer] = []
-        renderer.write(utterance(item.text)) { [weak self, weak item] buffer in
+        let text = item.text, index = item.index
+        renderer.write(utterance(text, index: index)) { [weak self, weak item] buffer in
             guard let pcm = buffer as? AVAudioPCMBuffer else { return }
             if pcm.frameLength > 0 { chunks.append(pcm); return }
-            let joined = AudioIO.shared.convert(chunks)
+            // The engine doesn't apply postUtteranceDelay, so the natural pause is added as silence.
+            let joined = AudioIO.shared.convert(chunks).map { StreamingVoice.padded($0, frames: Humanize.silence(after: text, index: index, format: $0.format)) }
             DispatchQueue.main.async {
                 guard let self, let item, gen == self.generation else { return }
                 item.rendering = false
@@ -519,13 +527,18 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
         }
     }
 
-    private func utterance(_ text: String) -> AVSpeechUtterance {
-        let u = AVSpeechUtterance(string: text)
-        u.voice = Speaker.resolveVoice()
-        u.rate = Settings.speechRate
-        u.prefersAssistiveTechnologySettings = false
-        u.postUtteranceDelay = 0.04
-        return u
+    /// Mac voice: SSML with breaths, pauses, stress and slight variation (see `Humanize`).
+    private func utterance(_ text: String, index: Int) -> AVSpeechUtterance {
+        Humanize.utterance(text, voice: Speaker.resolveVoice(), rate: Settings.speechRate, index: index)
+    }
+
+    static func padded(_ b: AVAudioPCMBuffer, frames: AVAudioFrameCount) -> AVAudioPCMBuffer {
+        guard frames > 0, let out = AVAudioPCMBuffer(pcmFormat: b.format, frameCapacity: b.frameLength + frames),
+              let src = b.floatChannelData?[0], let dst = out.floatChannelData?[0] else { return b }
+        memcpy(dst, src, Int(b.frameLength) * MemoryLayout<Float>.size)
+        memset(dst + Int(b.frameLength), 0, Int(frames) * MemoryLayout<Float>.size)
+        out.frameLength = b.frameLength + frames
+        return out
     }
 
     /// Play the next sentence once it's ready, strictly in order.
@@ -551,7 +564,7 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
             queue.removeFirst()
             playing = true
             began(next)
-            synth.speak(utterance(next.text))
+            synth.speak(utterance(next.text, index: next.index))
         } else if let pcm = next.pcm {
             queue.removeFirst()
             guard let p = try? AVAudioPlayer(data: AudioIO.wav(pcm16: pcm)) else { next.useMacVoice = true; queue.insert(next, at: 0); pump(); return }

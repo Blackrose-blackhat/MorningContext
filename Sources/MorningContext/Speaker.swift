@@ -24,7 +24,8 @@ final class Speaker: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let clean = Speaker.stripMarkdown(text)
         guard !clean.isEmpty else { return }
 
-        let u = AVSpeechUtterance(string: clean)
+        // The whole script as SSML: pauses between sentences and paragraphs, breaths, slight variation.
+        let u = AVSpeechUtterance(ssmlRepresentation: Humanize.document(clean)) ?? AVSpeechUtterance(string: clean)
         u.voice = Speaker.resolveVoice()
         u.rate = Settings.speechRate
         u.prefersAssistiveTechnologySettings = false
@@ -62,6 +63,35 @@ final class Speaker: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     static func resolveVoice() -> AVSpeechSynthesisVoice? {
         let wanted = Settings.voiceIdentifier
         if !wanted.isEmpty, let v = AVSpeechSynthesisVoice(identifier: wanted) { return v }
+        // No voice chosen in the app: the one you picked in System Settings → Accessibility → Spoken Content.
+        // (Leaving the voice unset would give the *language* default instead, e.g. en-IN → "Rishi".)
+        if let v = spokenContentVoice() { return v }
+        return bestInstalledVoice()
+    }
+
+    /// Your Spoken Content voice for English (or the current language), read from the Accessibility preferences.
+    static func spokenContentVoice() -> AVSpeechSynthesisVoice? {
+        CFPreferencesAppSynchronize("com.apple.Accessibility" as CFString)   // pick up a change made while we're running
+        guard let list = CFPreferencesCopyAppValue("SpokenContentDefaultVoiceSelectionsByLanguage" as CFString,
+                                                   "com.apple.Accessibility" as CFString) as? [Any] else { return nil }
+        // Stored as [language, {voiceId: …}, language, {…}, …]
+        var byLanguage: [String: String] = [:]
+        var i = 0
+        while i + 1 < list.count {
+            if let lang = list[i] as? String, let sel = list[i + 1] as? [String: Any], let id = sel["voiceId"] as? String {
+                byLanguage[lang] = id
+            }
+            i += 2
+        }
+        let current = Locale.current.language.languageCode?.identifier ?? "en"
+        for lang in [Locale.current.identifier.replacingOccurrences(of: "_", with: "-"), current, "en"] {
+            if let id = byLanguage[lang], let v = AVSpeechSynthesisVoice(identifier: id) { return v }
+        }
+        return nil
+    }
+
+    /// The old automatic pick (best quality installed, then locale), kept for reference in Settings.
+    static func bestInstalledVoice() -> AVSpeechSynthesisVoice? {
         // Default: quality first (Premium > Enhanced > compact), then your locale. Among the compact voices,
         // locale alone picks badly (en-IN → "Rishi", one of the most robotic), so prefer the clearest ones.
         let locale = Locale.current.identifier.replacingOccurrences(of: "_", with: "-")

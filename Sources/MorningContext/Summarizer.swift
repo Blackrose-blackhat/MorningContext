@@ -56,7 +56,11 @@ enum Summarizer {
         the same content rewritten as something a friendly assistant would say out loud to me first thing in the morning. \
         Plain prose only — no headings, bullets, Markdown, code, URLs, or file paths (say "the settings file" not "settings.swift"). \
         Start with "Good morning" and the day, then the most important thing, then project by project, then meetings, then what to do first today. \
-        Short sentences. Spell out abbreviations the first time. Around 250–350 words (about two minutes of speech). End with one upbeat sentence.
+        Short sentences. Spell out abbreviations the first time. Around 250–350 words (about two minutes of speech). End with one upbeat sentence. \
+        Talk like a person, not a report: use contractions (it's, you've, there's), mostly short sentences with the \
+        odd longer one, and natural connectors ("So,", "Also,", "One more thing,", "Good news:"). No lists, no brackets, \
+        no "firstly / secondly". You may stress at most one word in a sentence by wrapping it in single asterisks, \
+        like *two* or *today*; use it rarely, only where a person would lean on the word.
         """
         let extra = Settings.extraInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
         if !extra.isEmpty { p += "\n\nAdditional instructions from me: \(extra)" }

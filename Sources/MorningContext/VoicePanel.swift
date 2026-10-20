@@ -122,7 +122,7 @@ final class VoiceSession: ObservableObject {
     /// Start the conversation with today's brief and the raw digest it was written from.
     func begin(briefMarkdown: String, rawContext: String, snapshot: Date = Date()) {
         reset()
-        if !ElevenLabs.isConfigured, !(Settings.defaults.string(forKey: Settings.Key.elevenLabsVoiceId) ?? "").isEmpty {
+        if Settings.useElevenLabs, !ElevenLabs.isConfigured {
             // You picked an ElevenLabs voice but the key is gone: say so instead of quietly sounding worse.
             notice = "ElevenLabs key not set, so this is the Mac voice. Add your key in Control Panel → Voice."
         } else if !ElevenLabs.isConfigured, !StreamingVoice.hasNaturalVoice {

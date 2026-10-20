@@ -108,6 +108,12 @@ enum Settings {
         defaults.object(forKey: Key.autoSpeak) == nil ? true : defaults.bool(forKey: Key.autoSpeak)
     }
 
+    /// Speak with ElevenLabs (needs your key and credits) or the Mac voice. Off unless you chose ElevenLabs.
+    static var useElevenLabs: Bool {
+        get { defaults.object(forKey: "useElevenLabs") as? Bool ?? defaults.bool(forKey: "elevenLabsKeySaved") }
+        set { defaults.set(newValue, forKey: "useElevenLabs") }
+    }
+
     static var voiceIdentifier: String {
         defaults.string(forKey: Key.voiceIdentifier) ?? ""
     }
