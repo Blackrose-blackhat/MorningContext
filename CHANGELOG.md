@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-10-20
+
+### Added
+- First-run welcome in the Control Panel: checks for the Claude Code CLI, Wispr Flow, Codex and `gh`, asks for
+  microphone/speech access, explains what is read and what is sent where, and lets you choose what it may do.
+  Nothing runs automatically until you press **Start my first brief**.
+- README: "Privacy: what leaves your Mac" section.
+
+### Changed
+- Handing coding tasks to Claude is now off by default (opt in from the welcome or the Control Panel).
+- The Control Panel window is see-through frosted glass, matching the voice panel.
+- Install instructions: macOS 15+ needs System Settings → Privacy & Security → Open Anyway for unnotarized apps.
+- Example rules and prompts no longer use a real person's name.
+
 ## [1.0.0] - 2026-10-20
 
 First public release.
@@ -27,5 +41,6 @@ First public release.
 - Unit tests for secret redaction, text helpers and pronunciation.
 - `build.sh` to package an ad-hoc signed `.app` and install it to `/Applications`.
 
-[Unreleased]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Blackrose-blackhat/MorningContext/releases/tag/v1.0.0
