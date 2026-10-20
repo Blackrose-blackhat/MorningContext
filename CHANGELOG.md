@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-20
+
+### Added
+- Motion: the voice panel springs up from the bottom of the screen (just above the Dock) with a soft pop, arrives
+  as the orb and unfurls into the pill; on close the pill folds back into the orb, which dips down and fades.
+- Captions light up word by word in step with the voice.
+- The orb leans in (grows and glows a little) while you talk; action buttons pop in one after another.
+- Respects macOS Reduce Motion (simple fades only).
+
+### Changed
+- The voice panel sits at the bottom centre of the screen instead of the top, and the caption strip grows upward.
+
 ## [1.1.1] - 2026-10-20
 
 ### Added
@@ -86,7 +98,8 @@ First public release.
 - Unit tests for secret redaction, text helpers and pronunciation.
 - `build.sh` to package an ad-hoc signed `.app` and install it to `/Applications`.
 
-[Unreleased]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.0.0...v1.0.1
