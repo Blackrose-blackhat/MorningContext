@@ -108,6 +108,11 @@ enum Settings {
         defaults.object(forKey: Key.autoSpeak) == nil ? true : defaults.bool(forKey: Key.autoSpeak)
     }
 
+    /// A soft "pop" when the voice panel appears.
+    static var sounds: Bool {
+        defaults.object(forKey: "sounds") as? Bool ?? true
+    }
+
     /// Speak with ElevenLabs (needs your key and credits) or the Mac voice. Off unless you chose ElevenLabs.
     static var useElevenLabs: Bool {
         get { defaults.object(forKey: "useElevenLabs") as? Bool ?? defaults.bool(forKey: "elevenLabsKeySaved") }

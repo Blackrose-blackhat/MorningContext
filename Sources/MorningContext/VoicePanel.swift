@@ -29,6 +29,11 @@ final class VoiceSession: ObservableObject {
     /// Recent loudness (yours while listening, its own while speaking) for the waveform and bars.
     @Published var levels: [Float] = Array(repeating: 0, count: 48)
     @Published var outputLevel: Float = 0
+    /// When the current caption started being spoken, and how long it takes: drives word-by-word highlighting.
+    @Published var captionStart = Date()
+    @Published var captionDuration: Double = 1
+    /// Orb only (arriving / leaving) vs. the full pill.
+    @Published var expanded = false
     /// Muted: it won't listen while it talks or after it finishes (tap the orb to talk anyway).
     @Published var micMuted = false {
         didSet { if micMuted, listener.isListening, listener.bargeInMode { listener.cancel() } }
@@ -65,9 +70,11 @@ final class VoiceSession: ObservableObject {
 
     init() {
         engine.onEvent = { [weak self] in self?.handle($0) }
-        voice.onSentenceStart = { [weak self] s in
+        voice.onSentenceStart = { [weak self] s, duration in
             guard let self else { return }
             if !self.caption.isEmpty { self.previousCaption = self.caption }
+            self.captionStart = Date()
+            self.captionDuration = duration
             self.caption = s
             self.spokenThisTurn.append(s)
             if self.assistantOpen, let last = self.messages.indices.last, self.messages[last].role == .assistant {
@@ -397,8 +404,11 @@ final class VoiceSession: ObservableObject {
 final class VoicePanelController {
     let session = VoiceSession()
     private var panel: VoicePanel?
+    private var leaving = false
 
-    var isVisible: Bool { panel?.isVisible == true }
+    var isVisible: Bool { panel?.isVisible == true && !leaving }
+
+    private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
     func show() {
         if panel == nil {
@@ -410,34 +420,95 @@ final class VoicePanelController {
             host.layer?.backgroundColor = .clear
             p.contentView = host
             resize(to: host.fittingSize)
-            session.onClose = { [weak self] in self?.panel?.orderOut(nil) }
+            session.onClose = { [weak self] in self?.dismiss() }
             panel = p
         }
-        place()
-        panel?.orderFrontRegardless()
-        panel?.makeKey()
-        AppLog().info("voice panel shown at \(panel.map { NSStringFromRect($0.frame) } ?? "-") on \(NSScreen.main?.localizedName ?? "?")")
+        guard let panel else { return }
+        if panel.isVisible && !leaving { panel.orderFrontRegardless(); panel.makeKey(); return }
+        leaving = false
+        arrive(panel)
+        AppLog().info("voice panel shown at \(NSStringFromRect(panel.frame)) on \(NSScreen.main?.localizedName ?? "?")")
     }
 
     func hide() { session.close() }
 
-    /// The SwiftUI content reports its size; grow/shrink downward from the top edge.
-    private func resize(to size: CGSize) {
-        guard let panel, size.width > 0, size.height > 0 else { return }
-        let top = panel.frame.height > 1 ? panel.frame.maxY : nil
-        var frame = panel.frame
-        frame.size = size
-        if let top { frame.origin.y = top - size.height }
-        panel.setFrame(frame, display: true)
-        if top == nil { place() }
+    /// Springs up from below the screen to just above the Dock, as the orb; then the pill unfurls.
+    private func arrive(_ panel: NSPanel) {
+        session.expanded = false
+        place()
+        let rest = panel.frame
+        if Settings.sounds { NSSound(named: "Pop")?.play() }
+        if reduceMotion {
+            panel.alphaValue = 0
+            panel.orderFrontRegardless(); panel.makeKey()
+            NSAnimationContext.runAnimationGroup { $0.duration = 0.2; panel.animator().alphaValue = 1 }
+            session.expanded = true
+            return
+        }
+        var start = rest
+        start.origin.y -= rest.height + 40
+        panel.setFrame(start, display: false)
+        panel.alphaValue = 0
+        panel.orderFrontRegardless(); panel.makeKey()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.5
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.34, 1.45, 0.64, 1)   // a little overshoot
+            panel.animator().setFrame(rest, display: true)
+            panel.animator().alphaValue = 1
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in
+            withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) { self?.session.expanded = true }
+        }
     }
 
-    /// Top centre of the screen you're working on (the one with the active window).
+    /// The pill folds back into the orb, which dips down and fades.
+    private func dismiss() {
+        guard let panel, panel.isVisible, !leaving else { panel?.orderOut(nil); return }
+        leaving = true
+        if reduceMotion {
+            NSAnimationContext.runAnimationGroup({ $0.duration = 0.18; panel.animator().alphaValue = 0 },
+                                                 completionHandler: { [weak self] in self?.finishDismiss() })
+            return
+        }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { session.expanded = false }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self, let panel = self.panel else { return }
+            var end = panel.frame
+            end.origin.y -= 70
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.28
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                panel.animator().setFrame(end, display: true)
+                panel.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in self?.finishDismiss() })
+        }
+    }
+
+    private func finishDismiss() {
+        guard leaving else { return }
+        panel?.orderOut(nil)
+        panel?.alphaValue = 1
+        leaving = false
+    }
+
+    /// The SwiftUI content reports its size; stay centred and grow upward from the bottom edge.
+    private func resize(to size: CGSize) {
+        guard let panel, size.width > 0, size.height > 0 else { return }
+        let had = panel.frame.height > 1
+        var frame = panel.frame
+        let midX = frame.midX
+        frame.size = size
+        if had { frame.origin.x = midX - size.width / 2 }   // bottom (origin.y) stays put
+        panel.setFrame(frame, display: true)
+        if !had { place() }
+    }
+
+    /// Bottom centre of the screen you're working on, just above the Dock.
     private func place() {
         guard let panel, let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let size = panel.frame.size
         let vis = screen.visibleFrame
-        panel.setFrameOrigin(NSPoint(x: vis.midX - size.width / 2, y: vis.maxY - size.height - 4))
+        panel.setFrameOrigin(NSPoint(x: vis.midX - size.width / 2, y: vis.minY + 18))
     }
 }
 
@@ -480,18 +551,25 @@ struct VoiceView: View {
     var onSize: (CGSize) -> Void = { _ in }
     @State private var typing = false
     @FocusState private var fieldFocused: Bool
+    private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 
     var body: some View {
+        // Sits at the bottom of the screen: the caption strip grows upward above the pill.
         VStack(spacing: 8) {
+            if showsStrip && session.expanded { strip.transition(stripTransition) }
             pill
-            if showsStrip { strip.transition(.move(edge: .top).combined(with: .opacity)) }
         }
-        .frame(width: 460)
+        .frame(width: 460, alignment: .bottom)
         .padding(14)   // room for the glass shadow
         .fixedSize(horizontal: false, vertical: true)
         .background(GeometryReader { g in Color.clear.preference(key: SizeKey.self, value: g.size) })
         .onPreferenceChange(SizeKey.self) { onSize($0) }
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showsStrip)
+        .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.38, dampingFraction: 0.82), value: showsStrip)
+        .animation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.42, dampingFraction: 0.78), value: session.expanded)
+    }
+
+    private var stripTransition: AnyTransition {
+        reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity).combined(with: .scale(scale: 0.96, anchor: .bottom))
     }
 
     private var isError: Bool { if case .error = session.state { return true }; return false }
@@ -525,34 +603,50 @@ struct VoiceView: View {
         }
     }
 
-    // orb · status · live bars · mute · type · brief · close
+    /// You're talking: the orb leans in (a touch bigger, with a glow).
+    private var leaning: Bool { session.state == .listening && !session.userLine.isEmpty }
+
+    private var orb: some View {
+        Button { session.tapOrb() } label: {
+            OrbView(state: orbState, inputLevel: session.level, outputLevel: session.outputLevel)
+                .frame(width: 32, height: 32)
+                .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
+                .scaleEffect(reduceMotion ? 1 : (leaning ? 1.14 : 1))
+                .shadow(color: Color(hex: 0xA0B9D1).opacity(leaning ? 0.7 : 0), radius: leaning ? 10 : 0)
+                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: leaning)
+        }
+        .buttonStyle(.plain)
+        .help("Tap to talk or interrupt (Space)")
+    }
+
+    // Arriving / leaving: just the orb. Otherwise orb · status · bars · mute · type · brief · close.
     private var pill: some View {
         HStack(spacing: 10) {
-            Button { session.tapOrb() } label: {
-                OrbView(state: orbState, inputLevel: session.level, outputLevel: session.outputLevel)
-                    .frame(width: 32, height: 32)
-                    .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
-            }
-            .buttonStyle(.plain)
-            .help("Tap to talk or interrupt (Space)")
-            status
-            Spacer(minLength: 4)
-            if barState != .idle {
-                BarVisualizer(state: barState, levels: Array(session.levels.suffix(12)), barCount: 9, height: 18, barWidth: 3, gap: 2)
-                    .transition(.opacity)
-            }
-            if session.isActive {
-                icon(session.micMuted ? "mic.slash" : "mic", on: session.micMuted,
-                     help: session.micMuted ? "Unmute" : "Mute: don't listen while it talks") { session.micMuted.toggle() }
-                icon("keyboard", on: typing, help: "Type instead") {
-                    typing.toggle()
-                    if typing { DispatchQueue.main.async { fieldFocused = true } }
+            orb
+            if session.expanded {
+                Group {
+                    status.lineLimit(1).truncationMode(.tail).layoutPriority(1)
+                    Spacer(minLength: 4)
+                    if barState != .idle {
+                        BarVisualizer(state: barState, levels: Array(session.levels.suffix(12)), barCount: 9, height: 18, barWidth: 3, gap: 2)
+                            .transition(.opacity.combined(with: .scale(scale: 0.6)))
+                    }
+                    if session.isActive {
+                        icon(session.micMuted ? "mic.slash" : "mic", on: session.micMuted,
+                             help: session.micMuted ? "Unmute" : "Mute: don't listen while it talks") { session.micMuted.toggle() }
+                        icon("keyboard", on: typing, help: "Type instead") {
+                            typing.toggle()
+                            if typing { DispatchQueue.main.async { fieldFocused = true } }
+                        }
+                    }
+                    icon("doc.text", on: false, help: "Open the written brief") { session.onShowBrief() }
+                    icon("xmark", on: false, help: "Close (Esc)") { session.close() }
                 }
+                .transition(.opacity.combined(with: .move(edge: .leading)))
             }
-            icon("doc.text", on: false, help: "Open the written brief") { session.onShowBrief() }
-            icon("xmark", on: false, help: "Close (Esc)") { session.close() }
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
+        .padding(.horizontal, session.expanded ? 12 : 8).padding(.vertical, 8)
+        .frame(maxWidth: session.expanded ? .infinity : nil)
         .glass(Capsule(), interactive: true)
         .animation(.easeOut(duration: 0.2), value: barState)
     }
@@ -564,30 +658,34 @@ struct VoiceView: View {
         case .checking(let what): ShimmeringText(text: "Checking · " + what)
         case .speaking: Text("Speaking").font(.system(size: 13, weight: .medium))
         case .listening: Text("Listening…").font(.system(size: 13, weight: .medium))
-        case .idle: Text(session.isActive ? (session.micMuted ? "Muted · tap the orb" : "Just talk, or tap the orb") : "Morning Context")
+        case .idle: Text(session.isActive ? (session.micMuted ? "Muted" : "Listening when you talk") : "Morning Context")
             .font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
         case .error: Text("Something went wrong").font(.system(size: 13, weight: .medium)).foregroundStyle(.orange)
         }
     }
 
-    // A slim strip: the current line, buttons it offers, a notice, or a text box.
+    // A slim strip above the pill: the current line, buttons it offers, a notice, or a text box.
     private var strip: some View {
         VStack(alignment: .leading, spacing: 10) {
             if case .error(let msg) = session.state {
                 Label(msg, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.orange)
             }
             if !caption.isEmpty {
-                Text(caption)
-                    .font(.system(size: 14, weight: session.state == .listening ? .regular : .medium))
-                    .foregroundStyle(session.state == .listening ? .secondary : .primary)
-                    .lineLimit(3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .id(caption)
-                    .transition(.opacity)
+                Group {
+                    if session.state == .speaking {
+                        SpokenCaption(text: caption, start: session.captionStart, duration: session.captionDuration)
+                    } else {
+                        Text(caption).font(.system(size: 14)).foregroundStyle(.secondary)
+                    }
+                }
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .id(caption)
+                .transition(.opacity.combined(with: .offset(y: 6)))
             }
             if !session.actions.isEmpty {
                 HStack(spacing: 6) {
-                    ForEach(session.actions) { a in
+                    ForEach(Array(session.actions.enumerated()), id: \.element.id) { i, a in
                         Button { session.perform(a) } label: {
                             Label(a.label, systemImage: a.kind == .copy ? "doc.on.clipboard" : (a.kind == .open ? "arrow.up.right" : "hammer"))
                                 .font(.caption.weight(.medium))
@@ -595,6 +693,8 @@ struct VoiceView: View {
                         }
                         .buttonStyle(.plain)
                         .glass(Capsule(), interactive: true)
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))
+                        .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.7).delay(Double(i) * 0.06), value: session.actions.count)
                     }
                 }
             }
@@ -634,6 +734,26 @@ struct VoiceView: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain).help(help)
+    }
+}
+
+/// The sentence being spoken, lit word by word in step with the voice (karaoke-style).
+struct SpokenCaption: View {
+    let text: String
+    let start: Date
+    let duration: Double
+
+    var body: some View {
+        TimelineView(.animation) { ctx in
+            let words = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+            let p = min(1, max(0, ctx.date.timeIntervalSince(start) / max(0.4, duration)))
+            let lit = Int((Double(words.count) * p).rounded(.up))
+            words.enumerated().reduce(Text("")) { acc, e in
+                acc + Text((e.offset == 0 ? "" : " ") + e.element)
+                    .foregroundColor(e.offset < lit ? .primary : .primary.opacity(0.35))
+            }
+            .font(.system(size: 14, weight: .medium))
+        }
     }
 }
 

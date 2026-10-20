@@ -423,7 +423,8 @@ enum Vocabulary {
 /// During a conversation everything plays through `AudioIO` (echo-cancelled, so you can talk over it);
 /// outside one (Settings → Test voice) it plays directly.
 final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate {
-    var onSentenceStart: (String) -> Void = { _ in }
+    /// A sentence started playing: its caption and roughly how long it takes to say (for word-by-word captions).
+    var onSentenceStart: (String, Double) -> Void = { _, _ in }
     var onAllDone: () -> Void = {}
     var onNotice: (String) -> Void = { _ in }
 
@@ -552,7 +553,8 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
             queue.removeFirst()
             guard let buffer else { pump(); return }
             playing = true
-            began(next)
+            began(next, duration: Double(buffer.frameLength) / buffer.format.sampleRate
+                                  - (next.useMacVoice ? Humanize.pauseAfter(next.text, index: next.index) : 0))
             let gen = generation
             AudioIO.shared.play(buffer) { [weak self] in
                 guard let self, gen == self.generation, self.playing else { return }
@@ -563,7 +565,7 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
         if next.useMacVoice {
             queue.removeFirst()
             playing = true
-            began(next)
+            began(next, duration: Double(next.text.count) / 14.5 * Double(AVSpeechUtteranceDefaultSpeechRate / max(0.2, Settings.speechRate)))
             synth.speak(utterance(next.text, index: next.index))
         } else if let pcm = next.pcm {
             queue.removeFirst()
@@ -571,15 +573,15 @@ final class StreamingVoice: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
             p.delegate = self
             player = p
             playing = true
-            began(next)
+            began(next, duration: p.duration)
             p.play()
         }
     }
 
-    private func began(_ item: Item) {
+    private func began(_ item: Item, duration: Double) {
         spoken.append(item.text)
         if spoken.count > 6 { spoken.removeFirst(spoken.count - 6) }
-        onSentenceStart(item.caption)
+        onSentenceStart(item.caption, max(0.4, duration))
     }
 
     private func finishedOne() {
