@@ -21,11 +21,18 @@ just talk to it about your day.
 
 1. Download the latest `MorningContext-*.zip` from [Releases](https://github.com/Blackrose-blackhat/MorningContext/releases/latest).
 2. Unzip and move **MorningContext.app** to `/Applications`.
-3. The app is ad-hoc signed, not notarized, so the first time right-click it → **Open**, or run:
+3. The app is ad-hoc signed, not notarized, so macOS blocks the first launch. Either:
+   - open it once, then go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway**
+     (on macOS 15 and later right-click → Open no longer skips this), or
+   - remove the quarantine flag in Terminal:
 
-   ```sh
-   xattr -dr com.apple.quarantine /Applications/MorningContext.app
-   ```
+     ```sh
+     xattr -dr com.apple.quarantine /Applications/MorningContext.app
+     ```
+4. A welcome window checks what's on your Mac and asks what it may do. Nothing is read, sent or spoken until
+   you press **Start my first brief**.
+
+Release builds are Apple Silicon (arm64). On an Intel Mac, build from source.
 
 ### From source
 
@@ -52,9 +59,24 @@ finds on your Mac before the first morning.
 |---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | Every user/assistant turn in the window, plus which tools/files were touched, grouped by repo and branch. Tool output is dropped as noise. |
 | Codex | `~/.codex/sessions/**/*.jsonl` | What you asked, what Codex answered, and what scheduled automation runs found. |
-| Wispr Flow | `~/Library/Application Support/Wispr Flow/flow.sqlite` | Meetings (summary, notes, speaker-labelled transcript), notes, dictations grouped by app and time, and today's calendar. Opened read-only/immutable so it never blocks Wispr Flow. |
+| Wispr Flow | `~/Library/Application Support/Wispr Flow/flow.sqlite` | Meetings (summary, notes, speaker-labelled transcript), notes, dictations grouped by app and time, and today's calendar. Opened read-only (falling back to immutable), so it never blocks Wispr Flow. |
 | Extra folder (optional) | whatever you set | `.txt/.md/.vtt/.srt/.json` files modified in the window — handy if a meeting recorder exports transcripts. |
 | Trackers & email (optional) | via Claude Code / Codex | Each morning Claude plans what's worth checking with the connectors you already have (Jira, Azure Boards, Gmail, …) and runs those checks read-only, in parallel, in the repo they belong to. |
+
+## Privacy: what leaves your Mac
+
+| What | Where it goes | When |
+|---|---|---|
+| A digest of yesterday's Claude Code / Codex sessions, Wispr Flow meetings and notes | Claude, through **your own** `claude` CLI login (same as using Claude Code) | Each brief, and during a conversation |
+| Read-only questions to your trackers and inbox (Jira, Azure Boards, Gmail, …) | Claude Code / Codex, using the connectors and credentials **you** already gave them | While preparing the brief, if you allow it in the welcome / Control Panel → Sources |
+| The sentences it speaks | ElevenLabs | Only if you add an ElevenLabs key; otherwise the on-device Mac voice is used |
+
+Everything else stays local: speech recognition runs on-device, briefs are Markdown files in
+`~/Library/Application Support/MorningContext`, and API keys, tokens and passwords found in your logs are
+redacted before anything is sent. Morning Context has no server and no telemetry.
+
+Handing coding tasks to Claude ("get Claude on it") is **off by default**. When you turn it on, each job runs in
+its own git worktree branch, commits locally and never pushes.
 
 ## How "every morning" works
 

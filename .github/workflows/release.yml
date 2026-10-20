@@ -52,9 +52,11 @@ jobs:
 
           ### Install
           1. Download `MorningContext-*.zip`, unzip, and move **MorningContext.app** to `/Applications`.
-          2. The build is ad-hoc signed, not notarized: the first time, right-click the app → **Open**
-             (or run `xattr -dr com.apple.quarantine /Applications/MorningContext.app`).
-          3. Requires the Claude Code CLI, logged in (`claude` works in Terminal).
+          2. The build is ad-hoc signed, not notarized. Open it once, then System Settings → Privacy & Security →
+             **Open Anyway** (right-click → Open no longer works on macOS 15+), or run
+             `xattr -dr com.apple.quarantine /Applications/MorningContext.app`.
+          3. Requires the Claude Code CLI, logged in (`claude` works in Terminal). Apple Silicon only.
+          4. A welcome window explains what it reads and asks what it may do; nothing runs until you press Start.
           NOTES
 
       - name: Publish GitHub release
