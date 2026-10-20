@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: swift --version
+
+      - name: Build (debug)
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Package app bundle
+        run: ./build.sh
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: MorningContext-${{ github.sha }}
+          path: build/MorningContext.app
+          retention-days: 7
