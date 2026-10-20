@@ -352,8 +352,13 @@ enum LiveChecks {
         and confirm in a few words.
 
         Jira, Azure Boards, Gmail and Codex information in the context was gathered while the brief was prepared (see \
-        the "asked Claude at" times). Answer from it and say it's as of then; you can't re-check those live during the \
-        conversation. Only GitHub and git can be checked live, and only when asked.
+        the "asked Claude at" times). By default answer from it and say it's as of then. When they ask you to check \
+        Jira, Azure Boards, email, calendar or anything else again / now / live, start a live check instead of refusing: \
+        say one short line like "Checking Azure Boards now, about a minute." and add (applied, not shown):
+        ACTION: <what, e.g. Azure Boards> | recheck | <repo name it belongs to, or codex for email/calendar, or claude> :: <a self-contained read-only question with IDs and what changed since when>
+        Then keep talking if they want. The answer arrives as a message starting with [Live check]: tell them what's \
+        new in two or three spoken sentences, compared with the morning's snapshot. GitHub and git you can also check \
+        directly with your own Bash tool (faster) when asked.
 
         \(Settings.handoffEnabled ? "" : "Handing work to Claude is switched off in the control panel: never offer claude or claude-start actions; just say what they could ask Claude to do. Ignore the next paragraph.\n")
         Handing work to Claude: you can't change code yourself, but you can start Claude Code to do it. It runs unattended \

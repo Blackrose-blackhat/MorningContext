@@ -17,8 +17,26 @@ final class AudioIO {
     private var attached = false
     private let lock = NSLock()
     private var inputHandler: ((AVAudioPCMBuffer) -> Void)?
+    /// Loudness of what's being played (0…1), on the main queue — drives the orb and bars while it talks.
+    var onOutputLevel: ((Float) -> Void)?
 
-    var inputFormat: AVAudioFormat { engine.inputNode.outputFormat(forBus: 0) }
+    /// What listeners receive: always mono. With echo cancellation the mic arrives as several channels (your
+    /// echo-cancelled voice on channel 0, plus references), which the speech recognizer silently can't use.
+    var inputFormat: AVAudioFormat {
+        let f = engine.inputNode.outputFormat(forBus: 0)
+        return AVAudioFormat(standardFormatWithSampleRate: f.sampleRate, channels: 1) ?? f
+    }
+
+    /// Channel 0 as its own mono buffer (no copy when it's already mono float).
+    static func mono(_ b: AVAudioPCMBuffer) -> AVAudioPCMBuffer {
+        guard b.format.channelCount > 1 || b.format.commonFormat != .pcmFormatFloat32,
+              let fmt = AVAudioFormat(standardFormatWithSampleRate: b.format.sampleRate, channels: 1),
+              let out = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: b.frameLength),
+              let src = b.floatChannelData?[0], let dst = out.floatChannelData?[0] else { return b }
+        out.frameLength = b.frameLength
+        memcpy(dst, src, Int(b.frameLength) * MemoryLayout<Float>.size)
+        return out
+    }
 
     /// Called on the audio thread with every mic buffer (already echo-cancelled when that's available).
     func setInputHandler(_ h: ((AVAudioPCMBuffer) -> Void)?) {
@@ -58,7 +76,17 @@ final class AudioIO {
         input.installTap(onBus: 0, bufferSize: 1024, format: fmt) { [weak self] buffer, _ in
             guard let self else { return }
             self.lock.lock(); let h = self.inputHandler; self.lock.unlock()
-            h?(buffer)
+            h?(AudioIO.mono(buffer))
+        }
+        engine.mainMixerNode.removeTap(onBus: 0)
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
+            guard let ch = buffer.floatChannelData?[0] else { return }
+            let n = Int(buffer.frameLength)
+            var sum: Float = 0
+            for i in 0..<n { sum += ch[i] * ch[i] }
+            let rms = sqrt(sum / Float(max(n, 1)))
+            let level = min(1, max(0, (20 * log10(max(rms, 1e-6)) + 50) / 40))
+            DispatchQueue.main.async { self?.onOutputLevel?(level) }
         }
         engine.prepare()
         try engine.start()
@@ -69,6 +97,7 @@ final class AudioIO {
 
     private func teardown() {
         engine.inputNode.removeTap(onBus: 0)
+        engine.mainMixerNode.removeTap(onBus: 0)
         engine.stop()
         engine.reset()
     }
@@ -78,6 +107,7 @@ final class AudioIO {
         setInputHandler(nil)
         player.stop()
         engine.inputNode.removeTap(onBus: 0)
+        engine.mainMixerNode.removeTap(onBus: 0)
         engine.stop()
         running = false
     }
@@ -111,29 +141,35 @@ final class AudioIO {
         return buf
     }
 
-    /// Joins and converts the Mac voice's rendered chunks to `playFormat`.
+    /// Joins the Mac voice's rendered chunks, then resamples them to `playFormat` in a single pass.
+    /// (Converting chunk by chunk drops samples at every boundary, which you hear as stutter.)
     func convert(_ chunks: [AVAudioPCMBuffer]) -> AVAudioPCMBuffer? {
-        let total = chunks.reduce(0.0) { $0 + Double($1.frameLength) * playFormat.sampleRate / $1.format.sampleRate }
-        guard total > 0, let out = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: AVAudioFrameCount(total + 2048)) else { return nil }
-        var converters: [String: AVAudioConverter] = [:]
-        for chunk in chunks where chunk.frameLength > 0 {
-            let key = "\(chunk.format)"
-            guard let conv = converters[key] ?? AVAudioConverter(from: chunk.format, to: playFormat) else { continue }
-            converters[key] = conv
-            let cap = AVAudioFrameCount(Double(chunk.frameLength) * playFormat.sampleRate / chunk.format.sampleRate + 512)
-            guard let piece = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: cap) else { continue }
-            var given = false
-            conv.convert(to: piece, error: nil) { _, status in
-                if given { status.pointee = .noDataNow; return nil }
-                given = true; status.pointee = .haveData; return chunk
+        let parts = chunks.filter { $0.frameLength > 0 }
+        guard let fmt = parts.first?.format else { return nil }
+        let total = parts.reduce(0) { $0 + Int($1.frameLength) }
+        guard let joined = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(total)) else { return nil }
+        let bytesPerFrame = Int(fmt.streamDescription.pointee.mBytesPerFrame)
+        let dst = UnsafeMutableAudioBufferListPointer(joined.mutableAudioBufferList)
+        for part in parts where part.format == fmt {
+            let src = UnsafeMutableAudioBufferListPointer(part.mutableAudioBufferList)
+            let offset = Int(joined.frameLength) * bytesPerFrame
+            let bytes = Int(part.frameLength) * bytesPerFrame
+            for (s, d) in zip(src, dst) where s.mData != nil && d.mData != nil {
+                memcpy(d.mData! + offset, s.mData!, bytes)
             }
-            let n = Int(min(piece.frameLength, out.frameCapacity - out.frameLength))
-            if n > 0, let src = piece.floatChannelData?[0], let dst = out.floatChannelData?[0] {
-                memcpy(dst + Int(out.frameLength), src, n * MemoryLayout<Float>.size)
-                out.frameLength += AVAudioFrameCount(n)
-            }
+            joined.frameLength += part.frameLength
         }
-        return out.frameLength > 0 ? out : nil
+        if fmt == playFormat { return joined }
+        guard let conv = AVAudioConverter(from: fmt, to: playFormat) else { return nil }
+        let cap = AVAudioFrameCount(Double(joined.frameLength) * playFormat.sampleRate / fmt.sampleRate + 4096)
+        guard let out = AVAudioPCMBuffer(pcmFormat: playFormat, frameCapacity: cap) else { return nil }
+        var given = false
+        var error: NSError?
+        conv.convert(to: out, error: &error) { _, status in
+            if given { status.pointee = .endOfStream; return nil }   // end of stream flushes the resampler's tail
+            given = true; status.pointee = .haveData; return joined
+        }
+        return error == nil && out.frameLength > 0 ? out : nil
     }
 
     /// WAV wrapper so ElevenLabs PCM also plays outside a conversation (Settings → Test voice).

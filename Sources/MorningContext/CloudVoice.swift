@@ -8,6 +8,7 @@ enum ElevenLabs {
         let id: String
         let name: String
         let detail: String
+        var previewURL: URL? = nil
     }
 
     /// Low-latency model, built for conversational agents.
@@ -96,7 +97,8 @@ enum ElevenLabs {
                     guard let id = v["voice_id"] as? String, let name = v["name"] as? String else { return nil }
                     let labels = (v["labels"] as? [String: Any] ?? [:]).values.compactMap { $0 as? String }
                     let category = v["category"] as? String ?? ""
-                    return Voice(id: id, name: name, detail: ([category] + labels).filter { !$0.isEmpty }.joined(separator: " · "))
+                    return Voice(id: id, name: name, detail: ([category] + labels).filter { !$0.isEmpty }.joined(separator: " · "),
+                                 previewURL: (v["preview_url"] as? String).flatMap(URL.init(string:)))
                 }.sorted { $0.name < $1.name })
             } else { result = .failure(err(apiError(status: status, data: data))) }
             DispatchQueue.main.async { completion(result) }
@@ -106,6 +108,9 @@ enum ElevenLabs {
     private static func apiError(status: Int, data: Data?) -> String {
         let detail = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             .flatMap { ($0["detail"] as? [String: Any])?["message"] as? String ?? $0["detail"] as? String }
+        if let d = detail, d.lowercased().contains("quota") || d.lowercased().contains("credits") {
+            return "ElevenLabs credits are used up for this month."
+        }
         switch status {
         case 401: return "ElevenLabs rejected the API key" + (detail.map { ": \($0)" } ?? ".")
         case 404: return "ElevenLabs couldn't find that voice. Pick another in Settings."

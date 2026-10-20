@@ -24,6 +24,27 @@ final class VoiceSession: ObservableObject {
     @Published var level: Float = 0
     @Published var typed = ""
     @Published var notice: String?
+    /// The conversation so far, for the message bubbles (your turns and what it actually said aloud).
+    @Published var messages: [ChatLine] = []
+    /// Recent loudness (yours while listening, its own while speaking) for the waveform and bars.
+    @Published var levels: [Float] = Array(repeating: 0, count: 48)
+    @Published var outputLevel: Float = 0
+    /// Muted: it won't listen while it talks or after it finishes (tap the orb to talk anyway).
+    @Published var micMuted = false {
+        didSet { if micMuted, listener.isListening, listener.bargeInMode { listener.cancel() } }
+    }
+
+    struct ChatLine: Identifiable, Equatable {
+        let id = UUID()
+        let role: ChatRole
+        var text: String
+    }
+    private var assistantOpen = false
+
+    private func pushLevel(_ v: Float) {
+        levels.append(v)
+        if levels.count > 48 { levels.removeFirst(levels.count - 48) }
+    }
 
     var onShowBrief: () -> Void = {}
     var onClose: () -> Void = {}
@@ -49,6 +70,13 @@ final class VoiceSession: ObservableObject {
             if !self.caption.isEmpty { self.previousCaption = self.caption }
             self.caption = s
             self.spokenThisTurn.append(s)
+            if self.assistantOpen, let last = self.messages.indices.last, self.messages[last].role == .assistant {
+                self.messages[last].text += (self.messages[last].text.isEmpty ? "" : " ") + s
+            } else {
+                self.messages.append(ChatLine(role: .assistant, text: s))
+                self.assistantOpen = true
+                if self.messages.count > 30 { self.messages.removeFirst(self.messages.count - 30) }
+            }
         }
         voice.onAllDone = { [weak self] in
             guard let self, self.turnDone else { return }
@@ -67,7 +95,12 @@ final class VoiceSession: ObservableObject {
             self.userLine = text
             self.state = .listening
         }
-        listener.onLevel = { [weak self] in self?.level = $0 }
+        listener.onLevel = { [weak self] in self?.level = $0; self?.pushLevel($0) }
+        AudioIO.shared.onOutputLevel = { [weak self] v in
+            guard let self, self.state == .speaking else { return }
+            self.outputLevel = v
+            self.pushLevel(v)
+        }
         listener.onFinish = { [weak self] outcome in
             guard let self else { return }
             switch outcome {
@@ -89,7 +122,10 @@ final class VoiceSession: ObservableObject {
     /// Start the conversation with today's brief and the raw digest it was written from.
     func begin(briefMarkdown: String, rawContext: String, snapshot: Date = Date()) {
         reset()
-        if !ElevenLabs.isConfigured, !StreamingVoice.hasNaturalVoice {
+        if !ElevenLabs.isConfigured, !(Settings.defaults.string(forKey: Settings.Key.elevenLabsVoiceId) ?? "").isEmpty {
+            // You picked an ElevenLabs voice but the key is gone: say so instead of quietly sounding worse.
+            notice = "ElevenLabs key not set, so this is the Mac voice. Add your key in Control Panel → Voice."
+        } else if !ElevenLabs.isConfigured, !StreamingVoice.hasNaturalVoice {
             notice = "Tip: add an ElevenLabs API key in Settings, or download a Premium voice (System Settings → Accessibility → Spoken Content → Manage Voices), so I sound less robotic."
         }
         askPermissionsEarly()
@@ -167,6 +203,8 @@ final class VoiceSession: ObservableObject {
         }
         interruptedAfter = nil
         spokenThisTurn = []
+        assistantOpen = false
+        if !text.hasPrefix("[") { messages.append(ChatLine(role: .user, text: text)) }
         userLine = text
         actions = []
         chunker = SpeechChunker()
@@ -189,8 +227,45 @@ final class VoiceSession: ObservableObject {
         case .remember:
             IntakePlanner.addRule(a.payload)
             notice = "Got it. From tomorrow's brief: \(a.payload)"
+        case .recheck:
+            recheck(a)
         }
     }
+
+    /// "Check Azure again": a fresh read-only check, run the same way the brief gathers it (Claude in that repo with
+    /// its own setup, or Codex for email/calendar). Runs in the background; the answer is spoken when it lands.
+    private func recheck(_ a: SpeechChunker.Action) {
+        let parts = a.payload.components(separatedBy: "::")
+        let target = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
+        let question = parts.dropFirst().joined(separator: "::").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+        let repo = repos.first { $0.name.lowercased() == target || ($0.slug?.lowercased() == target) }
+        let engine = target == "codex" ? "codex" : "claude"
+        let folder = repo?.path ?? Settings.claudeWorkDir.path
+        let source = Gather.Source(id: "live:\(UUID().uuidString.prefix(8))", name: a.label, folder: folder,
+                                   question: Gather.readOnlyRule
+                                       + (engine == "codex" ? "\nUse your connected apps/connectors only; never a browser, computer use or screen control."
+                                                            : "\nIf a connector can't reach something, try the signed-in CLI that covers it, read-only, before giving up.")
+                                       + "\n" + question + "\nAnswer in plain text under 1500 characters.",
+                                   engine: engine)
+        liveChecks += 1
+        notice = "Checking \(a.label) live (\(engine == "codex" ? "Codex" : "Claude")\(repo.map { " in \($0.name)" } ?? ""))… about a minute."
+        AppLog().info("live re-check: \(a.label) via \(engine) in \(repo?.name ?? "neutral folder")")
+        let since = BriefEngine.window().0
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let answer = Gather.Run(sources: [source], since: since, timeout: 240).wait().first
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.liveChecks -= 1
+                if self.liveChecks == 0 { self.notice = nil }
+                let body = answer?.text ?? "couldn't check: \(answer?.error ?? "no answer")"
+                AppLog().info("live re-check done: \(a.label) in \(Int(answer?.seconds ?? 0))s, ok: \(answer?.text != nil)")
+                self.pendingReports.append("[Live check] \(a.label), checked just now (\(Dates.time.string(from: Date()))): \(Secrets.redact(body))")
+                if self.state == .idle || self.isError { self.flushReports() }
+            }
+        }
+    }
+    private var liveChecks = 0
 
     /// "repo :: task" → a background Claude Code job in a fresh worktree of that repo.
     private func startJob(_ a: SpeechChunker.Action) {
@@ -269,7 +344,7 @@ final class VoiceSession: ObservableObject {
     /// Buttons, except claude-start, which you already said yes to: that one just starts.
     private func take(_ acts: [SpeechChunker.Action]) {
         for a in acts {
-            if a.kind == .claudeStart || a.kind == .remember { perform(a) } else { actions.append(a) }
+            if a.kind == .claudeStart || a.kind == .remember || a.kind == .recheck { perform(a) } else { actions.append(a) }
         }
     }
 
@@ -280,7 +355,7 @@ final class VoiceSession: ObservableObject {
             state = .speaking
         }
         // Keep listening while it talks, so you can just cut in.
-        if Settings.handsFree, micAllowed, AudioIO.shared.running, !sentences.isEmpty, !listener.isListening {
+        if Settings.handsFree, !micMuted, micAllowed, AudioIO.shared.running, !sentences.isEmpty, !listener.isListening {
             listener.start(bargeIn: true)
         }
     }
@@ -290,7 +365,7 @@ final class VoiceSession: ObservableObject {
         if flushReports() { return }
         // Hands-free: when it finishes, the interruption watcher becomes your turn (quietly ends after a few seconds).
         if listener.isListening, listener.bargeInMode {
-            if Settings.autoListen { listener.promote(); userLine = ""; state = .listening } else { listener.cancel(); state = .idle }
+            if Settings.autoListen, !micMuted { listener.promote(); userLine = ""; state = .listening } else { listener.cancel(); state = .idle }
             return
         }
         let endsInQuestion = lastReply.components(separatedBy: "\n").filter { !$0.hasPrefix("ACTION:") }
@@ -299,6 +374,7 @@ final class VoiceSession: ObservableObject {
     }
 
     private func reset() {
+        messages = []; assistantOpen = false; outputLevel = 0
         listener.cancel()
         voice.stop()
         caption = ""; previousCaption = ""; userLine = ""; actions = []; notice = nil; typed = ""
@@ -402,80 +478,112 @@ final class VoicePanel: NSPanel {
 struct VoiceView: View {
     @ObservedObject var session: VoiceSession
     var onSize: (CGSize) -> Void = { _ in }
-    @FocusState private var typing: Bool
+    @State private var typing = false
+    @FocusState private var fieldFocused: Bool
 
     var body: some View {
         VStack(spacing: 8) {
             pill
-            if showsCard { card.transition(.move(edge: .top).combined(with: .opacity)) }
+            if showsStrip { strip.transition(.move(edge: .top).combined(with: .opacity)) }
         }
         .frame(width: 460)
         .padding(14)   // room for the glass shadow
         .fixedSize(horizontal: false, vertical: true)
         .background(GeometryReader { g in Color.clear.preference(key: SizeKey.self, value: g.size) })
         .onPreferenceChange(SizeKey.self) { onSize($0) }
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showsCard)
-        .animation(.easeOut(duration: 0.2), value: session.actions.count)
-    }
-
-    private var showsCard: Bool {
-        !session.caption.isEmpty || !session.userLine.isEmpty || session.notice != nil || isError
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showsStrip)
     }
 
     private var isError: Bool { if case .error = session.state { return true }; return false }
-
-    // The always-visible pill: orb · waveform · status · close
-    private var pill: some View {
-        HStack(spacing: 12) {
-            Button { session.tapOrb() } label: { Orb(state: session.state, level: session.level) }
-                .buttonStyle(.plain)
-                .help("Tap to talk or interrupt (Space)")
-            Waveform(state: session.state, level: session.level)
-            Text(statusText)
-                .font(.system(size: 13, weight: .medium))
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            Button { session.onShowBrief() } label: { Image(systemName: "doc.text") }
-                .buttonStyle(.plain).foregroundStyle(.secondary).help("Open the written brief")
-            Button { session.close() } label: { Image(systemName: "xmark") }
-                .buttonStyle(.plain).foregroundStyle(.secondary).help("Close (Esc)")
-        }
-        .padding(.horizontal, 12).padding(.vertical, 9)
-        .glass(Capsule(), interactive: true)
+    private var showsStrip: Bool {
+        !caption.isEmpty || !session.actions.isEmpty || session.notice != nil || isError || typing
     }
 
-    private var statusText: String {
+    /// One line, never a transcript: what you're saying while you talk, otherwise the sentence it's on.
+    private var caption: String {
+        if session.state == .listening { return session.userLine }
+        if session.state == .speaking { return session.caption }
+        return ""
+    }
+
+    private var orbState: OrbState {
         switch session.state {
-        case .preparing(let s): return s
-        case .thinking: return "Thinking…"
-        case .checking(let what): return "Checking live · " + what
-        case .speaking: return "Speaking · tap to interrupt"
-        case .listening: return "Listening…"
-        case .idle: return session.isActive ? "Tap the orb or press Space to talk" : "Morning Context"
-        case .error: return "Something went wrong"
+        case .speaking: return .talking
+        case .listening: return .listening
+        case .thinking, .checking, .preparing: return .thinking
+        case .idle, .error: return .idle
         }
     }
 
-    // Captions, what you said, action chips, and a text box
-    private var card: some View {
+    private var barState: BarState {
+        switch session.state {
+        case .speaking: return .speaking
+        case .listening: return .listening
+        case .thinking, .checking: return .thinking
+        case .preparing: return .connecting
+        case .idle, .error: return .idle
+        }
+    }
+
+    // orb · status · live bars · mute · type · brief · close
+    private var pill: some View {
+        HStack(spacing: 10) {
+            Button { session.tapOrb() } label: {
+                OrbView(state: orbState, inputLevel: session.level, outputLevel: session.outputLevel)
+                    .frame(width: 32, height: 32)
+                    .overlay(Circle().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+            .help("Tap to talk or interrupt (Space)")
+            status
+            Spacer(minLength: 4)
+            if barState != .idle {
+                BarVisualizer(state: barState, levels: Array(session.levels.suffix(12)), barCount: 9, height: 18, barWidth: 3, gap: 2)
+                    .transition(.opacity)
+            }
+            if session.isActive {
+                icon(session.micMuted ? "mic.slash" : "mic", on: session.micMuted,
+                     help: session.micMuted ? "Unmute" : "Mute: don't listen while it talks") { session.micMuted.toggle() }
+                icon("keyboard", on: typing, help: "Type instead") {
+                    typing.toggle()
+                    if typing { DispatchQueue.main.async { fieldFocused = true } }
+                }
+            }
+            icon("doc.text", on: false, help: "Open the written brief") { session.onShowBrief() }
+            icon("xmark", on: false, help: "Close (Esc)") { session.close() }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .glass(Capsule(), interactive: true)
+        .animation(.easeOut(duration: 0.2), value: barState)
+    }
+
+    @ViewBuilder private var status: some View {
+        switch session.state {
+        case .preparing(let s): ShimmeringText(text: s)
+        case .thinking: ShimmeringText(text: "Thinking…")
+        case .checking(let what): ShimmeringText(text: "Checking · " + what)
+        case .speaking: Text("Speaking").font(.system(size: 13, weight: .medium))
+        case .listening: Text("Listening…").font(.system(size: 13, weight: .medium))
+        case .idle: Text(session.isActive ? (session.micMuted ? "Muted · tap the orb" : "Just talk, or tap the orb") : "Morning Context")
+            .font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
+        case .error: Text("Something went wrong").font(.system(size: 13, weight: .medium)).foregroundStyle(.orange)
+        }
+    }
+
+    // A slim strip: the current line, buttons it offers, a notice, or a text box.
+    private var strip: some View {
         VStack(alignment: .leading, spacing: 10) {
             if case .error(let msg) = session.state {
-                Label(msg, systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout).foregroundStyle(.orange)
+                Label(msg, systemImage: "exclamationmark.triangle.fill").font(.callout).foregroundStyle(.orange)
             }
-            if !session.previousCaption.isEmpty {
-                Text(session.previousCaption).font(.callout).foregroundStyle(.secondary).lineLimit(2)
-            }
-            if !session.caption.isEmpty {
-                Text(session.caption)
-                    .font(.system(size: 15, weight: .medium))
+            if !caption.isEmpty {
+                Text(caption)
+                    .font(.system(size: 14, weight: session.state == .listening ? .regular : .medium))
+                    .foregroundStyle(session.state == .listening ? .secondary : .primary)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-            if !session.userLine.isEmpty && session.userLine != "[start]" {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Image(systemName: session.state == .listening ? "mic.fill" : "person.fill").foregroundStyle(.secondary)
-                    Text(session.userLine).font(.callout.weight(.semibold)).lineLimit(3)
-                }
+                    .id(caption)
+                    .transition(.opacity)
             }
             if !session.actions.isEmpty {
                 HStack(spacing: 6) {
@@ -493,95 +601,45 @@ struct VoiceView: View {
             if let n = session.notice {
                 Text(n).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            if session.isActive {
+            if typing && session.isActive {
                 HStack(spacing: 8) {
-                    TextField("Type instead…", text: $session.typed)
-                        .textFieldStyle(.plain)
-                        .focused($typing)
+                    TextField("Type a message…", text: $session.typed)
+                        .textFieldStyle(.plain).font(.system(size: 13))
+                        .focused($fieldFocused)
                         .onSubmit { session.submitTyped() }
-                    Button { session.tapOrb() } label: {
-                        Image(systemName: session.state == .listening ? "stop.fill" : "mic.fill")
+                    Button { session.submitTyped() } label: {
+                        Image(systemName: "arrow.up").font(.system(size: 11, weight: .bold))
+                            .frame(width: 24, height: 24)
+                            .foregroundStyle(Color(nsColor: .windowBackgroundColor))
+                            .background(Color.primary.opacity(session.typed.isEmpty ? 0.3 : 0.92), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
-                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .buttonStyle(.plain).disabled(session.typed.isEmpty)
                 }
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .glass(Capsule(), interactive: false)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             }
         }
-        .padding(16)
+        .padding(.horizontal, 16).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glass(RoundedRectangle(cornerRadius: 22, style: .continuous), interactive: false)
+        .glass(RoundedRectangle(cornerRadius: 18, style: .continuous), interactive: false)
+        .animation(.easeOut(duration: 0.18), value: caption)
+    }
+
+    private func icon(_ symbol: String, on: Bool, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 12, weight: .medium))
+                .frame(width: 24, height: 24)
+                .background(on ? Color.primary.opacity(0.1) : .clear, in: Circle())
+                .foregroundStyle(on ? .primary : .secondary)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain).help(help)
     }
 }
 
 private struct SizeKey: PreferenceKey {
     static var defaultValue: CGSize = .zero
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
-}
-
-/// A living gradient orb: swirls while thinking, pulses while speaking, follows your voice while listening.
-struct Orb: View {
-    let state: VoiceSession.State
-    let level: Float
-
-    var body: some View {
-        TimelineView(.animation) { ctx in
-            let t = ctx.date.timeIntervalSinceReferenceDate
-            let pulse: Double = {
-                switch state {
-                case .listening: return Double(level) * 0.35
-                case .speaking: return 0.07 * sin(t * 7) + 0.03
-                case .thinking, .preparing, .checking: return 0.04 * sin(t * 3)
-                default: return 0
-                }
-            }()
-            let spin: Double = { switch state { case .thinking, .preparing, .checking: return 180; case .idle: return 25; default: return 70 } }()
-            ZStack {
-                Circle().fill(AngularGradient(colors: colors + [colors[0]], center: .center, angle: .degrees(t * spin)))
-                    .blur(radius: 1.5)
-                Circle().fill(RadialGradient(colors: [.white.opacity(0.9), .white.opacity(0)], center: UnitPoint(x: 0.35, y: 0.3), startRadius: 0, endRadius: 12))
-            }
-            .frame(width: 28, height: 28)
-            .scaleEffect(1 + pulse)
-            .shadow(color: colors[1].opacity(state == .idle ? 0.25 : 0.7), radius: 8 + pulse * 30)
-        }
-        .frame(width: 34, height: 34)
-    }
-
-    private var colors: [Color] {
-        if case .error = state { return [.orange, .red, .pink] }
-        if state == .listening { return [Color(red: 0.2, green: 0.8, blue: 1), Color(red: 0.45, green: 0.4, blue: 1), Color(red: 0.3, green: 1, blue: 0.75)] }
-        return [Color(red: 1, green: 0.62, blue: 0.3), Color(red: 1, green: 0.35, blue: 0.55), Color(red: 0.5, green: 0.42, blue: 1)]
-    }
-}
-
-struct Waveform: View {
-    let state: VoiceSession.State
-    let level: Float
-
-    var body: some View {
-        TimelineView(.animation) { ctx in
-            let t = ctx.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 3) {
-                ForEach(0..<7, id: \.self) { i in
-                    Capsule().frame(width: 3, height: height(i, t))
-                }
-            }
-            .frame(height: 20)
-            .foregroundStyle(.primary.opacity(active ? 0.85 : 0.3))
-        }
-    }
-
-    private var active: Bool { state == .speaking || state == .listening }
-
-    private func height(_ i: Int, _ t: Double) -> CGFloat {
-        let wobble = abs(sin(t * (5 + Double(i)) + Double(i) * 1.3))
-        switch state {
-        case .listening: return 4 + CGFloat(level) * 16 * CGFloat(0.4 + 0.6 * wobble)
-        case .speaking: return 4 + 12 * CGFloat(wobble)
-        default: return 4
-        }
-    }
 }
 
 extension View {

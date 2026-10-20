@@ -217,6 +217,7 @@ struct ControlPanelView: View {
     // A hand-built sidebar + content (not NavigationSplitView, which paints an opaque background over the glass).
     var body: some View {
         HStack(spacing: 0) {
+            if model.onboarded {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(Section.allCases) { s in
                     let on = (section ?? .overview) == s && model.onboarded
@@ -239,6 +240,7 @@ struct ControlPanelView: View {
             .frame(maxHeight: .infinity)
             .glass(RoundedRectangle(cornerRadius: 18, style: .continuous), interactive: false)
             .padding(8)
+            }
 
             Group {
                 if !model.onboarded {
@@ -268,6 +270,8 @@ enum GlassWindow {
         if #available(macOS 26.0, *) {
             let glass = NSGlassEffectView()
             glass.cornerRadius = 16
+            // A light tint keeps it glass but stops sharp text behind the window competing with ours.
+            glass.tintColor = NSColor.windowBackgroundColor.withAlphaComponent(0.6)
             glass.contentView = content
             return glass
         }
@@ -285,102 +289,276 @@ enum GlassWindow {
     }
 }
 
-/// First run: what it is, what it reads and sends, what's on this Mac, and the opt-ins — nothing runs until "Start".
+/// First run, one step at a time: hello → your Mac → microphone → voice → permissions → ready.
+/// Nothing reads, sends or speaks until "Start my first brief".
 struct WelcomeView: View {
     @ObservedObject var model: ControlPanelModel
+
+    private enum Step: Int, CaseIterable { case hello, mac, mic, voice, allow, ready }
+    @State private var step: Step = .hello
+    @State private var forward = true
+
     @AppStorage(Settings.Key.gatherEnabled) private var gatherEnabled = true
     @AppStorage(Settings.Key.plannerEnabled) private var plannerEnabled = true
     @AppStorage(Settings.Key.handoffEnabled) private var handoffEnabled = false
     @AppStorage(Settings.Key.talkOnMorning) private var talkOnMorning = true
+    @AppStorage(Settings.Key.elevenLabsVoiceId) private var elevenVoiceId = ""
     @State private var launchAtLogin = LoginItem.isEnabled
     @State private var asking = false
+    @State private var useEleven = ElevenLabs.probablyConfigured
+    @State private var elevenKey = ""
+    @State private var elevenVoices: [ElevenLabs.Voice] = []
+    @State private var voiceStatus = ""
+    private static let tester = StreamingVoice()
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Welcome to Morning Context").font(.system(size: 28, weight: .bold))
-                    Text("Each morning it reads what you did yesterday on this Mac, asks Claude to brief you, and talks you through it. You can interrupt and ask anything. Nothing runs until you press Start.")
-                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
+        VStack(spacing: 0) {
+            dots.padding(.top, 36)
+            ZStack {
+                content
+                    .id(step)
+                    .transition(.asymmetric(insertion: .move(edge: forward ? .trailing : .leading).combined(with: .opacity),
+                                            removal: .move(edge: forward ? .leading : .trailing).combined(with: .opacity)))
+            }
+            .frame(maxWidth: 520, maxHeight: .infinity)
+            .padding(.horizontal, 32)
+            footer.padding(.horizontal, 32).padding(.bottom, 28)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.spring(response: 0.4, dampingFraction: 0.88), value: step)
+    }
 
-                card("On this Mac") {
-                    row(model.setup?.claude != nil, "Claude Code CLI",
-                        model.setup.map { $0.claude != nil ? "Found. Briefs and checks run through your own logged-in `claude`." : "Not found. Install Claude Code and run `claude` once in Terminal; it's required." } ?? "Checking…",
-                        required: true)
-                    row(model.setup?.wispr == true, "Wispr Flow", model.setup?.wispr == true ? "Found: meetings, notes and dictations." : "Not found (optional).")
-                    row(model.setup?.codex == true, "Codex", model.setup?.codex == true ? "Found: sessions and automation runs; can also answer checks (e.g. Gmail)." : "Not found (optional).")
-                    row(model.setup?.ghUser != nil, "GitHub CLI", model.setup?.ghUser.map { "Signed in as \($0): PR and CI checks." } ?? "Not signed in (optional): `gh auth login`.")
-                    HStack {
-                        row(model.setup?.micAllowed == true, "Microphone & speech recognition", model.setup?.micAllowed == true ? "Allowed: talk to it, on-device." : "Needed to talk to it.")
-                        if model.setup?.micAllowed != true {
-                            Button(asking ? "Asking…" : "Allow") {
-                                asking = true
-                                Listener.requestPermissions { _ in asking = false; model.checkSetup() }
-                            }
-                        }
+    // MARK: Steps
+
+    @ViewBuilder private var content: some View {
+        switch step {
+        case .hello:
+            page(orb: .thinking, title: "Good morning, I'm Morning Context",
+                 text: "Each morning I read what you did yesterday on this Mac, brief you out loud, and you can interrupt and ask me anything.") {
+                EmptyView()
+            }
+        case .mac:
+            page(orb: .idle, title: "Let's see what's on your Mac", text: "I work through tools you already use. Only Claude Code is required.") {
+                VStack(alignment: .leading, spacing: 12) {
+                    check(model.setup?.claude != nil, "Claude Code", model.setup.map { $0.claude != nil ? "Ready. Briefs run through your own login." : "Not found. Install Claude Code and run `claude` once in Terminal." } ?? "Checking…", required: true)
+                    check(model.setup?.wispr == true, "Wispr Flow", model.setup?.wispr == true ? "Meetings, notes and dictations" : "Not found (optional)")
+                    check(model.setup?.codex == true, "Codex", model.setup?.codex == true ? "Sessions, automations, and email checks" : "Not found (optional)")
+                    check(model.setup?.ghUser != nil, "GitHub CLI", model.setup?.ghUser.map { "Signed in as \($0)" } ?? "Not signed in (optional)")
+                    if model.setup?.claude == nil, model.setup != nil {
+                        Button("Check again") { model.checkSetup() }
                     }
-                }
-
-                card("What it reads, and where it goes") {
-                    bullet("Reads, on this Mac only: Claude Code and Codex session logs, Wispr Flow's database, and an optional notes folder.")
-                    bullet("Sends a digest of that to Claude through your own `claude` login to write the brief and hold the conversation. API keys and tokens are stripped first.")
-                    bullet("If you allow it below, Claude also runs read-only checks with the connectors you already gave it (Jira, Azure Boards, Gmail via Codex, …).")
-                    bullet("If you add an ElevenLabs key, the sentences it speaks are sent to ElevenLabs. Otherwise it uses the Mac voice.")
-                    bullet("Briefs are saved as Markdown in ~/Library/Application Support/MorningContext.")
-                }
-
-                card("Choose what it may do") {
-                    Toggle("Ask Claude and Codex read-only questions while preparing the brief (trackers, email, PRs)", isOn: $gatherEnabled)
-                    Toggle("Let Claude decide what to check each morning", isOn: $plannerEnabled).disabled(!gatherEnabled)
-                    Toggle("Let the voice hand coding tasks to Claude in your repos (own branch, never pushes)", isOn: $handoffEnabled)
-                    Toggle("Talk me through it each morning (otherwise open the written brief)", isOn: $talkOnMorning)
-                    Toggle("Launch at login", isOn: $launchAtLogin).onChange(of: launchAtLogin) { LoginItem.set(enabled: $0) }
-                    Text("Checks and briefs use your Claude Code usage: a brief with checks is a few minutes of background work.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-
-                HStack {
-                    Button("Set up later") { model.finishSetup(start: false) }
-                    Spacer()
-                    Button { model.finishSetup(start: true) } label: {
-                        Label("Start my first brief", systemImage: "sunrise.fill").padding(.horizontal, 6)
-                    }
-                    .buttonStyle(.borderedProminent).tint(.orange)
-                    .disabled(model.setup?.claude == nil)
                 }
             }
-            .padding(28)
-            .frame(maxWidth: 760, alignment: .leading)
+        case .mic:
+            page(orb: .listening, title: "Talk to me", text: "I listen on this Mac only. Speech is turned into text on-device, and you can mute me any time.") {
+                VStack(spacing: 10) {
+                    if model.setup?.micAllowed == true {
+                        Label("Microphone and speech recognition allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        Button {
+                            asking = true
+                            Listener.requestPermissions { _ in asking = false; model.checkSetup() }
+                        } label: { Label(asking ? "Asking…" : "Allow microphone", systemImage: "mic.fill").padding(.horizontal, 8) }
+                        .buttonStyle(.borderedProminent).controlSize(.large)
+                        Text("You can skip this and only type.").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+        case .voice:
+            page(orb: .talking, title: "How should I sound?", text: "Pick a voice. You can change it later in Control Panel → Voice.") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 10) {
+                        choice(!useEleven, "Mac voice", "Free, on this Mac", "laptopcomputer") { useEleven = false }
+                        choice(useEleven, "ElevenLabs", "More natural · your own key", "waveform") { useEleven = true }
+                    }
+                    if useEleven { elevenSetup } else { macVoiceTip }
+                    if !voiceStatus.isEmpty { Text(voiceStatus).font(.caption).foregroundStyle(.secondary) }
+                }
+            }
+        case .allow:
+            page(orb: .idle, title: "What may I do?", text: "Everything here is read-only unless you say otherwise.") {
+                VStack(alignment: .leading, spacing: 12) {
+                    toggle($gatherEnabled, "Check your trackers and inbox", "Read-only questions to Jira, Azure Boards, Gmail… through your own Claude and Codex, while I prepare the brief.")
+                    toggle($plannerEnabled, "Decide what to check each morning", "I look at yesterday and pick what's worth checking.").disabled(!gatherEnabled)
+                    toggle($handoffEnabled, "Hand coding tasks to Claude", "Off by default. Each task runs on its own branch and never pushes.")
+                    Text("What leaves your Mac: a digest goes to Claude through your own login; spoken sentences go to ElevenLabs only if you added a key. Keys and tokens are stripped first.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        case .ready:
+            page(orb: .thinking, title: "You're all set", text: "I'll be ready the first time you open your Mac each morning. Press ⌃⌥M any time to talk.") {
+                VStack(alignment: .leading, spacing: 12) {
+                    toggle($talkOnMorning, "Talk me through it each morning", "Otherwise I open the written brief.")
+                    toggle(Binding(get: { launchAtLogin }, set: { launchAtLogin = $0; LoginItem.set(enabled: $0) }), "Launch at login", "So I'm running when you open the lid.")
+                }
+            }
         }
     }
 
-    private func card<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
+    private var elevenSetup: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary).tracking(0.6)
-            content()
+            numbered(1, "Create a free account at elevenlabs.io.")
+            numbered(2, "Open your profile → API Keys → Create, and copy the key.")
+            numbered(3, "Paste it below. It stays in your Mac's Keychain.")
+            HStack(spacing: 8) {
+                SecureField("ElevenLabs API key", text: $elevenKey).textFieldStyle(.roundedBorder)
+                Button("Save") { saveKey() }.disabled(elevenKey.isEmpty)
+            }
+            if !elevenVoices.isEmpty {
+                HStack {
+                    VoicePicker(voices: elevenVoices, selection: $elevenVoiceId, placeholder: "Default (Rachel)")
+                        .onChange(of: elevenVoiceId) { id in
+                            Settings.defaults.set(elevenVoices.first { $0.id == id }?.name, forKey: Settings.Key.elevenLabsVoiceName)
+                        }
+                    Button("Test") { test() }
+                }
+            }
+            Text("Free plan: 10,000 credits a month (about two weeks of daily briefs). When they run out I switch to the Mac voice and tell you.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
-        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-        .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: false)
     }
 
-    private func row(_ ok: Bool, _ title: String, _ detail: String, required: Bool = false) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: ok ? "checkmark.circle.fill" : (required ? "exclamationmark.circle.fill" : "circle"))
-                .foregroundStyle(ok ? .green : (required ? .orange : .secondary))
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    private var macVoiceTip: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Works right away. For a far more natural sound, download a Premium voice such as \"Zoe (Premium)\".")
+                .font(.callout).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Open Spoken Content settings") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?SpokenContent") { NSWorkspace.shared.open(url) }
+                }
+                Button("Test") { test() }
             }
+        }
+    }
+
+    // MARK: Chrome
+
+    private var dots: some View {
+        HStack(spacing: 7) {
+            ForEach(Step.allCases, id: \.self) { s in
+                Capsule().fill(s == step ? Color.primary : Color.primary.opacity(0.2))
+                    .frame(width: s == step ? 22 : 7, height: 7)
+            }
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            if step != .hello {
+                Button("Back") { go(-1) }.buttonStyle(.plain).foregroundStyle(.secondary)
+            }
+            Spacer()
+            switch step {
+            case .hello:
+                primary("Get started") { go(1) }
+            case .mac:
+                primary("Continue") { go(1) }.disabled(model.setup?.claude == nil)
+            case .mic:
+                if model.setup?.micAllowed != true { Button("Skip") { go(1) }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.trailing, 8) }
+                primary("Continue") { go(1) }
+            case .voice, .allow:
+                primary("Continue") { go(1) }
+            case .ready:
+                Button("Later") { model.finishSetup(start: false) }.buttonStyle(.plain).foregroundStyle(.secondary).padding(.trailing, 8)
+                primary("Start my first brief") { model.finishSetup(start: true) }
+            }
+        }
+    }
+
+    private func go(_ delta: Int) {
+        forward = delta > 0
+        step = Step(rawValue: max(0, min(Step.allCases.count - 1, step.rawValue + delta))) ?? step
+        if step == .mac || step == .mic { model.checkSetup() }
+    }
+
+    private func page<C: View>(orb: OrbState, title: String, text: String, @ViewBuilder _ body: () -> C) -> some View {
+        VStack(spacing: 18) {
+            Spacer(minLength: 0)
+            OrbView(state: orb, seed: 11)
+                .frame(width: 96, height: 96)
+                .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
+            VStack(spacing: 8) {
+                Text(title).font(.system(size: 24, weight: .semibold)).multilineTextAlignment(.center)
+                Text(text).font(.system(size: 14)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            body()
+                .padding(.top, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 0)
         }
     }
 
-    private func bullet(_ s: String) -> some View {
+    private func primary(_ title: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Text(title).padding(.horizontal, 10).padding(.vertical, 2) }
+            .buttonStyle(.borderedProminent).controlSize(.large).keyboardShortcut(.defaultAction)
+    }
+
+    private func check(_ ok: Bool, _ title: String, _ detail: String, required: Bool = false) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: ok ? "checkmark.circle.fill" : (required ? "exclamationmark.circle.fill" : "circle"))
+                .font(.system(size: 18)).foregroundStyle(ok ? .green : (required ? .orange : .secondary))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 14, weight: .semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .glass(RoundedRectangle(cornerRadius: 12, style: .continuous), interactive: false)
+    }
+
+    private func choice(_ on: Bool, _ title: String, _ detail: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 6) {
+                Image(systemName: icon).font(.system(size: 18))
+                Text(title).font(.system(size: 14, weight: .semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+            .background(on ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(on ? Color.accentColor : Color.primary.opacity(0.12), lineWidth: on ? 1.5 : 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func toggle(_ value: Binding<Bool>, _ title: String, _ detail: String) -> some View {
+        Toggle(isOn: value) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 14, weight: .semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .toggleStyle(.switch)
+        .padding(12)
+        .glass(RoundedRectangle(cornerRadius: 12, style: .continuous), interactive: false)
+    }
+
+    private func numbered(_ n: Int, _ s: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Text("•").foregroundStyle(.secondary)
+            Text("\(n)").font(.caption.weight(.bold)).frame(width: 18, height: 18)
+                .background(Color.primary.opacity(0.1), in: Circle())
             Text(s).font(.callout).fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func saveKey() {
+        ElevenLabs.apiKey = elevenKey
+        voiceStatus = "Loading your voices…"
+        ElevenLabs.listVoices(key: elevenKey) { r in
+            switch r {
+            case .success(let v): elevenVoices = v; voiceStatus = "\(v.count) voices. Pick one and test it."
+            case .failure(let e): voiceStatus = e.localizedDescription
+            }
+        }
+    }
+
+    private func test() {
+        Self.tester.stop(); Self.tester.resetCloud()
+        Self.tester.onNotice = { voiceStatus = $0 }
+        Self.tester.say("Good morning. This is how your brief will sound.")
     }
 }
 
@@ -391,7 +569,10 @@ struct OverviewView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .center) {
+                HStack(alignment: .center, spacing: 14) {
+                    OrbView(state: model.loading ? .thinking : .idle, seed: 3, fps: 30)
+                        .frame(width: 44, height: 44)
+                        .overlay(Circle().strokeBorder(.white.opacity(0.2), lineWidth: 0.5))
                     VStack(alignment: .leading, spacing: 4) {
                         Text(greeting).font(.system(size: 26, weight: .bold))
                         Text(model.nextBrief).font(.callout).foregroundStyle(.secondary)
@@ -449,7 +630,7 @@ struct OverviewView: View {
         HStack {
             Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary).tracking(0.6)
             Spacer()
-            if let t = trailing { ProgressView().controlSize(.small); Text(t).font(.caption).foregroundStyle(.secondary) }
+            if let t = trailing { ShimmeringText(text: t, font: .caption) }
         }
         .padding(.top, 4)
     }
@@ -767,11 +948,8 @@ struct VoiceSettingsView: View {
                     .onChange(of: elevenKey) { ElevenLabs.apiKey = $0; elevenStatus = "" }
                 HStack {
                     Button("Load my voices") { loadVoices() }.disabled(elevenKey.isEmpty)
-                    Picker("Voice", selection: $elevenVoiceId) {
-                        Text(elevenVoices.isEmpty ? "Default (Rachel)" : "Choose…").tag("")
-                        ForEach(elevenVoices) { v in Text(v.detail.isEmpty ? v.name : "\(v.name) · \(v.detail)").tag(v.id) }
-                    }
-                    .labelsHidden().disabled(elevenVoices.isEmpty)
+                    VoicePicker(voices: elevenVoices, selection: $elevenVoiceId,
+                                placeholder: elevenVoices.isEmpty ? "Load your voices first" : "Default (Rachel)")
                     .onChange(of: elevenVoiceId) { id in
                         Settings.defaults.set(elevenVoices.first { $0.id == id }?.name, forKey: Settings.Key.elevenLabsVoiceName)
                     }

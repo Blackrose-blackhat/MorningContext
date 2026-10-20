@@ -134,7 +134,7 @@ final class Listener {
             let mine = Listener.newWords(in: full, notIn: recentlySpoken())
             // Without hardware echo cancellation (e.g. sound on an external display), its own voice can be
             // misheard as new words, so ask for a bit more before treating it as you.
-            guard mine.count >= (AudioIO.shared.echoCancelling ? 2 : 3) else { return }
+            guard mine.count >= (AudioIO.shared.echoCancelling ? 2 : 4) else { return }
             bargeInMode = false
             sessionOffset = full.count - mine.joined(separator: " ").count
             latest = mine.joined(separator: " ")
@@ -156,16 +156,32 @@ final class Listener {
     private var sessionOffset = 0
     private var lastFull = ""
 
-    /// Words in `heard` that don't appear in what the voice just said (lower-cased, 2+ letters).
+    /// Words in `heard` that don't appear in what the voice just said (lower-cased, 2+ letters). A misheard echo
+    /// ("ranching" for "branching") counts as the voice too: anything within one or two letters of a spoken word.
     static func newWords(in heard: String, notIn spoken: String) -> [String] {
         func words(_ s: String) -> [String] {
             s.lowercased().components(separatedBy: CharacterSet.letters.inverted).filter { $0.count >= 2 }
         }
         let said = Set(words(spoken))
         return heard.components(separatedBy: .whitespaces).filter { w in
-            guard let core = words(w).first else { return false }
-            return !said.contains(core)
+            guard let core = words(w).first, !said.contains(core) else { return false }
+            let tolerance = core.count >= 7 ? 2 : (core.count >= 4 ? 1 : 0)
+            return !said.contains { abs($0.count - core.count) <= tolerance && editDistance($0, core) <= tolerance }
         }
+    }
+
+    static func editDistance(_ a: String, _ b: String) -> Int {
+        let x = Array(a), y = Array(b)
+        if x.isEmpty { return y.count }; if y.isEmpty { return x.count }
+        var prev = Array(0...y.count), cur = prev
+        for i in 1...x.count {
+            cur[0] = i
+            for j in 1...y.count {
+                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (x[i - 1] == y[j - 1] ? 0 : 1))
+            }
+            prev = cur
+        }
+        return prev[y.count]
     }
 
     private func deliver(_ text: String) {
@@ -610,7 +626,7 @@ enum Pronunciation {
 /// Splits Claude's token stream into speakable sentences, and pulls out `ACTION:` lines (shown, never spoken).
 struct SpeechChunker {
     struct Action: Identifiable, Equatable {
-        enum Kind: String { case copy, open, claude, claudeStart = "claude-start", remember }
+        enum Kind: String { case copy, open, claude, claudeStart = "claude-start", remember, recheck }
         let id = UUID()
         let label: String
         let kind: Kind
@@ -654,7 +670,7 @@ struct SpeechChunker {
         let parts = body.split(separator: "|", maxSplits: 2).map { $0.trimmingCharacters(in: .whitespaces) }
         guard parts.count == 3, let kind = Action.Kind(rawValue: parts[1].lowercased()), !parts[0].isEmpty, !parts[2].isEmpty else { return nil }
         if kind == .open, !(parts[2].hasPrefix("https://") || parts[2].hasPrefix("http://")) { return nil }
-        if kind == .claude || kind == .claudeStart, !parts[2].contains("::") { return nil }
+        if kind == .claude || kind == .claudeStart || kind == .recheck, !parts[2].contains("::") { return nil }
         return Action(label: parts[0], kind: kind, payload: parts[2].replacingOccurrences(of: "\\n", with: "\n"))
     }
 
