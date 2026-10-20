@@ -53,8 +53,20 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature so macOS runs it and SMAppService (launch at login) works.
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+# Sign with a stable identity when there is one, so macOS keeps Keychain, microphone and speech permissions
+# across rebuilds and updates. An ad-hoc signature changes every build, and each build looks like a new app.
+#   CODESIGN_IDENTITY="Developer ID Application: …" ./build.sh   (or a local "Morning Context Local Signing" cert)
+IDENTITY="${CODESIGN_IDENTITY:-}"
+if [[ -z "$IDENTITY" ]] && security find-identity -p codesigning 2>/dev/null | grep -q '"Morning Context Local Signing"'; then
+  IDENTITY="Morning Context Local Signing"
+fi
+if [[ -n "$IDENTITY" ]] && codesign --force --deep --sign "$IDENTITY" "$APP" >/dev/null 2>&1; then
+  echo "▸ Signed with \"$IDENTITY\" (permissions persist across rebuilds)"
+else
+  codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+  echo "▸ Ad-hoc signed: macOS will ask for Keychain/microphone access again after each rebuild."
+  echo "  One-time fix: create a \"Morning Context Local Signing\" code-signing certificate (see README → Signing)."
+fi
 echo "▸ Built $APP (version $VERSION, build $BUILD_NUMBER)"
 
 if [[ "${1:-}" == "--install" ]]; then
