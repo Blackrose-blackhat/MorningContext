@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build a release for, e.g. v1.0.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish
+    runs-on: macos-26
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Test
+        run: swift test
+
+      - name: Build app bundle
+        run: |
+          VERSION="${TAG#v}" BUILD_NUMBER="${{ github.run_number }}" ./build.sh
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          ZIP="dist/MorningContext-${TAG}-macos-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/MorningContext.app "$ZIP"
+          (cd dist && shasum -a 256 "$(basename "$ZIP")" > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Release notes from CHANGELOG
+        run: |
+          VER="${TAG#v}"
+          awk -v ver="$VER" '
+            $0 ~ "^## \\[" ver "\\]" { grab=1; next }
+            grab && /^## \[/ { exit }
+            grab { print }
+          ' CHANGELOG.md > dist/NOTES.md
+          if [ ! -s dist/NOTES.md ]; then echo "See CHANGELOG.md." > dist/NOTES.md; fi
+          cat >> dist/NOTES.md <<'NOTES'
+
+          ### Install
+          1. Download `MorningContext-*.zip`, unzip, and move **MorningContext.app** to `/Applications`.
+          2. The build is ad-hoc signed, not notarized: the first time, right-click the app → **Open**
+             (or run `xattr -dr com.apple.quarantine /Applications/MorningContext.app`).
+          3. Requires the Claude Code CLI, logged in (`claude` works in Terminal).
+          NOTES
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.zip dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" dist/*.zip dist/SHA256SUMS.txt \
+              --title "Morning Context ${TAG}" --notes-file dist/NOTES.md --verify-tag
+          fi
