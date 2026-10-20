@@ -1,0 +1,43 @@
+name: Bug report
+description: Something isn't working
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Morning Context version
+      placeholder: "1.0.0 (menu bar → About, or the release you downloaded)"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "26.0"
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: |
+        From `~/Library/Application Support/MorningContext/app.log`.
+        **Remove anything private first.** Briefs and logs can contain your work context.
+      render: text
+  - type: checkboxes
+    id: sources
+    attributes:
+      label: Sources in use
+      options:
+        - label: Claude Code
+        - label: Wispr Flow
+        - label: Codex
+        - label: Extra transcripts folder
+        - label: ElevenLabs voice
