@@ -1,0 +1,17 @@
+# SwiftPM / Xcode
+.build/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+Package.resolved
+
+# App bundle and release artifacts produced by build.sh
+build/
+dist/
+*.zip
+
+# Local tooling
+.superpowers/
+.claude/
+.DS_Store
