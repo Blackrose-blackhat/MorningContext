@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-20
+
+### Added
+- More human Mac voice: speech is sent as SSML with breaths at commas, real pauses between sentences (longer after
+  questions), slight pace and pitch variation from sentence to sentence, and stress on a word Claude marks.
+  Claude also writes for the ear (contractions, mixed sentence lengths, natural connectors). Applies to the live
+  conversation and to "Read aloud".
+- "Now using: <voice> · <quality>" in the welcome and Control Panel → Voice, with a nudge when only basic voices exist.
+
+### Changed
+- "Mac voice / ElevenLabs" is a real setting (welcome and Control Panel → Voice). With Mac voice chosen, ElevenLabs
+  isn't tried even if a key is saved, and the Keychain isn't touched.
+- With no voice picked in the app, it follows your System Settings → Accessibility → Spoken Content voice (and picks
+  up changes without a restart), instead of its own guess.
+
+### Fixed
+- The speed setting is applied again (SSML ignores the utterance rate, so it's carried in the markup).
+- Leaving the voice unset no longer falls back to the language default (e.g. en-IN "Rishi").
+
 ## [1.1.0] - 2026-10-20
 
 ### Added
@@ -67,7 +86,8 @@ First public release.
 - Unit tests for secret redaction, text helpers and pronunciation.
 - `build.sh` to package an ad-hoc signed `.app` and install it to `/Applications`.
 
-[Unreleased]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Blackrose-blackhat/MorningContext/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Blackrose-blackhat/MorningContext/releases/tag/v1.0.0
