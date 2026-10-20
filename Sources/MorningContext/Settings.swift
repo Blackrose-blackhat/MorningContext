@@ -32,6 +32,7 @@ enum Settings {
         static let handsFree            = "handsFree"
         static let plannerEnabled       = "plannerEnabled"
         static let intakeRules          = "intakeRules"
+        static let onboarded            = "onboarded"
     }
 
     static let home = FileManager.default.homeDirectoryForCurrentUser
@@ -159,7 +160,7 @@ enum Settings {
         defaults.object(forKey: Key.plannerEnabled) == nil ? true : defaults.bool(forKey: Key.plannerEnabled)
     }
 
-    /// Your standing instructions for the morning checks ("always check Render deploys", "skip Hershey's task emails").
+    /// Your standing instructions for the morning checks ("always check Render deploys", "skip CI notification emails").
     static var intakeRules: String { defaults.string(forKey: Key.intakeRules) ?? "" }
 
     /// Keep the mic open (echo-cancelled) while it talks, so you can interrupt just by speaking.
@@ -169,7 +170,13 @@ enum Settings {
 
     /// Let the voice companion start background Claude Code jobs.
     static var handoffEnabled: Bool {
-        defaults.object(forKey: Key.handoffEnabled) == nil ? true : defaults.bool(forKey: Key.handoffEnabled)
+        defaults.object(forKey: Key.handoffEnabled) == nil ? false : defaults.bool(forKey: Key.handoffEnabled)   // opt-in: it edits code
+    }
+
+    /// Finished the first-run welcome. Until then nothing runs on its own.
+    static var onboarded: Bool {
+        get { defaults.bool(forKey: Key.onboarded) }
+        set { defaults.set(newValue, forKey: Key.onboarded) }
     }
 
     /// Read Codex sessions and automation runs.

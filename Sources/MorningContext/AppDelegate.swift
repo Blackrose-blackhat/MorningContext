@@ -31,7 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.maybeShowMorningBrief(reason: "poll")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            self?.maybeShowMorningBrief(reason: "launch")
+            // First run: welcome first; nothing reads, sends or talks until you press Start.
+            if Settings.onboarded { self?.maybeShowMorningBrief(reason: "launch") } else { self?.showSettings() }
         }
     }
 
@@ -71,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Once per calendar day after `startHour`: prepare the brief silently in the background, then present it
     /// the moment it's ready and you're at the Mac (or at your next unlock if you've walked away).
     private func maybeShowMorningBrief(reason: String) {
+        guard Settings.onboarded else { return }
         let today = Dates.dayKey.string(from: Date())
         if let pending = pendingPresentation {
             if pending.dayKey == today, userIsPresent { present(pending, talk: Settings.talkOnMorning) }
@@ -233,15 +235,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             panelModel.onTalk = { [weak self] in self?.talkNow() }
             panelModel.onPrepare = { [weak self] in self?.generateAndShow(reason: "menu-prepare", silent: true) }
             panelModel.onShowBrief = { [weak self] in self?.showTodayOrGenerate() }
+            panelModel.onFinishSetup = { [weak self] start in
+                guard let self, start else { return }
+                Settings.lastBriefDate = Dates.dayKey.string(from: Date())
+                self.generateAndShow(reason: "first-run", talk: Settings.talkOnMorning)
+            }
             let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 720),
                              styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
                              backing: .buffered, defer: false)
             w.title = "Morning Context"
             w.titlebarAppearsTransparent = true
             w.titleVisibility = .hidden
+            w.isOpaque = false
+            w.backgroundColor = .clear
             w.toolbarStyle = .unified
             w.isReleasedWhenClosed = false
-            w.contentViewController = NSHostingController(rootView: ControlPanelView(model: panelModel))
+            let host = NSHostingView(rootView: ControlPanelView(model: panelModel))
+            host.wantsLayer = true
+            host.layer?.backgroundColor = .clear
+            w.contentView = GlassWindow.wrap(host)
             w.setFrameAutosaveName("MorningContext.ControlPanel")
             if w.frame.width < 900 { w.setContentSize(NSSize(width: 1040, height: 720)) }
             w.center()

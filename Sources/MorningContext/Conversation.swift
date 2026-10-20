@@ -347,7 +347,7 @@ enum LiveChecks {
         \(list.isEmpty ? "- none found" : list)
 
         If they tell you what the morning brief should or shouldn't look at ("always check Render deploys", "stop telling me \
-        about Hershey's task emails"), save it as a standing rule by adding this line (it's applied, not shown):
+        about CI notification emails"), save it as a standing rule by adding this line (it's applied, not shown):
         ACTION: Remember | remember | <the rule as a short instruction>
         and confirm in a few words.
 

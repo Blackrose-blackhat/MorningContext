@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import AVFoundation
+import Speech
 
 // MARK: - Status of every source, measured on this Mac
 
@@ -26,6 +28,37 @@ final class ControlPanelModel: ObservableObject {
     @Published var loading = false
     @Published var jobs: [ClaudeJobs.Job] = []
     @Published var plan: IntakePlanner.Plan?
+    @Published var onboarded = Settings.onboarded
+    @Published var setup: SetupStatus?
+
+    /// What the first-run welcome checks on this Mac.
+    struct SetupStatus {
+        var claude: String?     // path, or nil if not found
+        var codex: Bool
+        var wispr: Bool
+        var ghUser: String?
+        var micAllowed: Bool
+    }
+
+    /// `start`: run the first brief now. Either way, the welcome is done.
+    var onFinishSetup: (Bool) -> Void = { _ in }
+
+    func finishSetup(start: Bool) {
+        Settings.onboarded = true
+        onboarded = true
+        onFinishSetup(start)
+    }
+
+    func checkSetup() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let claude = try? ClaudeCLI.locate().claude
+            let codex = (try? ClaudeCLI.locate("codex")) != nil
+            let wispr = FileManager.default.fileExists(atPath: Settings.wisprDBPath)
+            let gh = Self.run("/opt/homebrew/bin/gh", ["config", "get", "-h", "github.com", "user"]) ?? Self.run("/usr/local/bin/gh", ["config", "get", "-h", "github.com", "user"])
+            let mic = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized && SFSpeechRecognizer.authorizationStatus() == .authorized
+            DispatchQueue.main.async { self.setup = SetupStatus(claude: claude, codex: codex, wispr: wispr, ghUser: gh, micAllowed: mic) }
+        }
+    }
 
     var onTalk: () -> Void = {}
     var onPrepare: () -> Void = {}
@@ -181,14 +214,36 @@ struct ControlPanelView: View {
     @ObservedObject var model: ControlPanelModel
     @State private var section: Section? = .overview
 
+    // A hand-built sidebar + content (not NavigationSplitView, which paints an opaque background over the glass).
     var body: some View {
-        NavigationSplitView {
-            List(Section.allCases, selection: $section) { s in
-                Label(s.rawValue, systemImage: s.icon).tag(s)
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Section.allCases) { s in
+                    let on = (section ?? .overview) == s && model.onboarded
+                    Button { section = s } label: {
+                        Label(s.rawValue, systemImage: s.icon)
+                            .font(.system(size: 13, weight: on ? .semibold : .regular))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .background(on ? Color.accentColor.opacity(0.85) : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .foregroundStyle(on ? .white : .primary)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!model.onboarded)
+                }
+                Spacer()
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
-        } detail: {
+            .padding(.top, 44).padding(.horizontal, 8).padding(.bottom, 10)
+            .frame(width: 200)
+            .frame(maxHeight: .infinity)
+            .glass(RoundedRectangle(cornerRadius: 18, style: .continuous), interactive: false)
+            .padding(8)
+
             Group {
+                if !model.onboarded {
+                    WelcomeView(model: model)
+                } else {
                 switch section ?? .overview {
                 case .overview: OverviewView(model: model)
                 case .sources: SourcesSettingsView(model: model)
@@ -196,11 +251,136 @@ struct ControlPanelView: View {
                 case .jobs: JobsView(model: model)
                 case .schedule: ScheduleSettingsView()
                 }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: 900, minHeight: 620)
-        .onAppear { model.refresh() }
+        .ignoresSafeArea()
+        .onAppear { model.refresh(); if !model.onboarded { model.checkSetup() } }
+    }
+}
+
+/// The see-through window background, matching the voice pill: Liquid Glass on macOS 26+,
+/// a frosted behind-window blur before that. Wraps the SwiftUI content view.
+enum GlassWindow {
+    static func wrap(_ content: NSView) -> NSView {
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = 16
+            glass.contentView = content
+            return glass
+        }
+        let blur = NSVisualEffectView()
+        blur.material = .hudWindow
+        blur.blendingMode = .behindWindow
+        blur.state = .active
+        content.translatesAutoresizingMaskIntoConstraints = false
+        blur.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: blur.leadingAnchor), content.trailingAnchor.constraint(equalTo: blur.trailingAnchor),
+            content.topAnchor.constraint(equalTo: blur.topAnchor), content.bottomAnchor.constraint(equalTo: blur.bottomAnchor),
+        ])
+        return blur
+    }
+}
+
+/// First run: what it is, what it reads and sends, what's on this Mac, and the opt-ins — nothing runs until "Start".
+struct WelcomeView: View {
+    @ObservedObject var model: ControlPanelModel
+    @AppStorage(Settings.Key.gatherEnabled) private var gatherEnabled = true
+    @AppStorage(Settings.Key.plannerEnabled) private var plannerEnabled = true
+    @AppStorage(Settings.Key.handoffEnabled) private var handoffEnabled = false
+    @AppStorage(Settings.Key.talkOnMorning) private var talkOnMorning = true
+    @State private var launchAtLogin = LoginItem.isEnabled
+    @State private var asking = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Welcome to Morning Context").font(.system(size: 28, weight: .bold))
+                    Text("Each morning it reads what you did yesterday on this Mac, asks Claude to brief you, and talks you through it. You can interrupt and ask anything. Nothing runs until you press Start.")
+                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+
+                card("On this Mac") {
+                    row(model.setup?.claude != nil, "Claude Code CLI",
+                        model.setup.map { $0.claude != nil ? "Found. Briefs and checks run through your own logged-in `claude`." : "Not found. Install Claude Code and run `claude` once in Terminal; it's required." } ?? "Checking…",
+                        required: true)
+                    row(model.setup?.wispr == true, "Wispr Flow", model.setup?.wispr == true ? "Found: meetings, notes and dictations." : "Not found (optional).")
+                    row(model.setup?.codex == true, "Codex", model.setup?.codex == true ? "Found: sessions and automation runs; can also answer checks (e.g. Gmail)." : "Not found (optional).")
+                    row(model.setup?.ghUser != nil, "GitHub CLI", model.setup?.ghUser.map { "Signed in as \($0): PR and CI checks." } ?? "Not signed in (optional): `gh auth login`.")
+                    HStack {
+                        row(model.setup?.micAllowed == true, "Microphone & speech recognition", model.setup?.micAllowed == true ? "Allowed: talk to it, on-device." : "Needed to talk to it.")
+                        if model.setup?.micAllowed != true {
+                            Button(asking ? "Asking…" : "Allow") {
+                                asking = true
+                                Listener.requestPermissions { _ in asking = false; model.checkSetup() }
+                            }
+                        }
+                    }
+                }
+
+                card("What it reads, and where it goes") {
+                    bullet("Reads, on this Mac only: Claude Code and Codex session logs, Wispr Flow's database, and an optional notes folder.")
+                    bullet("Sends a digest of that to Claude through your own `claude` login to write the brief and hold the conversation. API keys and tokens are stripped first.")
+                    bullet("If you allow it below, Claude also runs read-only checks with the connectors you already gave it (Jira, Azure Boards, Gmail via Codex, …).")
+                    bullet("If you add an ElevenLabs key, the sentences it speaks are sent to ElevenLabs. Otherwise it uses the Mac voice.")
+                    bullet("Briefs are saved as Markdown in ~/Library/Application Support/MorningContext.")
+                }
+
+                card("Choose what it may do") {
+                    Toggle("Ask Claude and Codex read-only questions while preparing the brief (trackers, email, PRs)", isOn: $gatherEnabled)
+                    Toggle("Let Claude decide what to check each morning", isOn: $plannerEnabled).disabled(!gatherEnabled)
+                    Toggle("Let the voice hand coding tasks to Claude in your repos (own branch, never pushes)", isOn: $handoffEnabled)
+                    Toggle("Talk me through it each morning (otherwise open the written brief)", isOn: $talkOnMorning)
+                    Toggle("Launch at login", isOn: $launchAtLogin).onChange(of: launchAtLogin) { LoginItem.set(enabled: $0) }
+                    Text("Checks and briefs use your Claude Code usage: a brief with checks is a few minutes of background work.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Button("Set up later") { model.finishSetup(start: false) }
+                    Spacer()
+                    Button { model.finishSetup(start: true) } label: {
+                        Label("Start my first brief", systemImage: "sunrise.fill").padding(.horizontal, 6)
+                    }
+                    .buttonStyle(.borderedProminent).tint(.orange)
+                    .disabled(model.setup?.claude == nil)
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 760, alignment: .leading)
+        }
+    }
+
+    private func card<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary).tracking(0.6)
+            content()
+        }
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .glass(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: false)
+    }
+
+    private func row(_ ok: Bool, _ title: String, _ detail: String, required: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: ok ? "checkmark.circle.fill" : (required ? "exclamationmark.circle.fill" : "circle"))
+                .foregroundStyle(ok ? .green : (required ? .orange : .secondary))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 13, weight: .semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func bullet(_ s: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("•").foregroundStyle(.secondary)
+            Text(s).font(.callout).fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -246,8 +426,8 @@ struct OverviewView: View {
                 header("What it can do", trailing: nil)
                 LazyVGrid(columns: columns, spacing: 12) {
                     AbilityCard(icon: "hammer.fill", tint: Color(red: 0.85, green: 0.47, blue: 0.34), title: "Hand off to Claude",
-                                detail: "\"Get Claude on it\": background job in its own worktree branch, edits and tests, never pushes.",
-                                key: Settings.Key.handoffEnabled)
+                                detail: "\"Get Claude on it\": background job in its own worktree branch, edits and tests, never pushes. Off until you turn it on.",
+                                key: Settings.Key.handoffEnabled, defaultOn: false)
                     AbilityCard(icon: "arrow.triangle.2.circlepath", tint: Color(white: 0.25), title: "Live GitHub checks",
                                 detail: "Say \"check again\" for current PR, review and CI state. Read-only.", key: nil)
                     AbilityCard(icon: "doc.on.clipboard", tint: .purple, title: "Drafts to clipboard",
@@ -376,6 +556,7 @@ struct SourceCardView: View {
 struct AbilityCard: View {
     let icon: String, tint: Color, title: String, detail: String
     let key: String?
+    var defaultOn = true
     @State private var on = true
 
     var body: some View {
@@ -388,7 +569,7 @@ struct AbilityCard: View {
                 if let key {
                     Toggle("", isOn: Binding(get: { on }, set: { on = $0; Settings.defaults.set($0, forKey: key) }))
                         .toggleStyle(.switch).controlSize(.mini).labelsHidden()
-                        .onAppear { on = Settings.defaults.object(forKey: key) as? Bool ?? true }
+                        .onAppear { on = Settings.defaults.object(forKey: key) as? Bool ?? defaultOn }
                 }
             }
             Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -427,7 +608,7 @@ struct SourcesSettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Your standing rules for the morning checks")
                     TextEditor(text: $intakeRules).font(.system(.body, design: .monospaced)).frame(minHeight: 70)
-                    Text("One per line, e.g. \"Always check Render deploys for ramp-lab\" or \"Skip Hershey's task emails\". You can also say it in the voice pill: \"always check…\".")
+                    Text("One per line, e.g. \"Always check Render deploys for ramp-lab\" or \"Skip CI notification emails\". You can also say it in the voice pill: \"always check…\".")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .disabled(!gatherEnabled || !plannerEnabled)
@@ -462,6 +643,7 @@ struct SourcesSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .onAppear {
             DispatchQueue.global().async {
                 let all = Gather.detect(includeDisabled: true)
@@ -512,6 +694,7 @@ struct JobsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
 
     private func icon(_ j: ClaudeJobs.Job) -> String {
@@ -551,6 +734,7 @@ struct ScheduleSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
 }
 
@@ -619,6 +803,7 @@ struct VoiceSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .onAppear { if !elevenKey.isEmpty { loadVoices() } }
     }
 
